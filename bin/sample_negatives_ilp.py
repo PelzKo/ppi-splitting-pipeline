@@ -407,20 +407,25 @@ def _fill_stratum(
     pool_keys=None,
     max_rounds=200,
 ) -> np.ndarray:
-    """Draw up to `quota` unique (i,j) keys (encoded i*n_proteins+j) via
-    repeated random batches, excluding `exclude_keys` (e.g. positives).
+    """Draw up to `quota` unique (i,j) keys (encoded i*n_proteins+j) via repeated random batches, excluding
+    `exclude_keys` (e.g. positives).
 
-    want_same: restrict to same-/cross-species pairs (stratifies the rare
-    same-species population against the much larger cross-species one).
-    go_membership/go_sizes: keep nonzero GO-BP Jaccard pairs first (rare
-    under a uniform draw). weights: sample proteins proportional to their
-    negative-degree cap instead of uniformly, so low-cap proteins aren't
-    wasted past their cap. pool_keys: sample from a fixed known pool
-    (--candidate-network) via _fill_stratum_from_pool instead of
-    generate-and-reject.
+    :param rng: random number generator used to sample from the full n_proteins**2 space.
+    :param n_proteins: number of proteins in the dataset
+    :param exclude_keys: (optional) keys to exclude from the sampling process (e.g. positives)
+    :param quota: number of unique (i,j) pairs to draw.
+    :param taxon_codes: taxon code for each protein, used to stratify the same-species/cross-species
+    :param want_same: restrict to same-/cross-species pairs (stratifies the rare same-species population against the
+    much larger cross-species one).
+    :param go_membership: and
+    :param go_sizes: keep nonzero GO-BP Jaccard pairs first (rare under a uniform draw).
+    :param weights: sample proteins proportional to their negative-degree cap instead of uniformly, so low-cap
+    proteins aren't wasted past their cap.
+    :param pool_keys: sample from a fixed known pool (--candidate-network) via _fill_stratum_from_pool
+    :param max_rounds: maximum number of sampling rounds to try before giving up. 200 is a good default, but
 
-    Returns fewer than `quota` (with a warning) if the true population is
-    smaller after `max_rounds` batches."""
+    :returns: (quota,) array of unique (i,j) keys (encoded i*n_proteins+j) drawn from the full n_proteins**2 space.
+    """
     if quota <= 0:
         return np.empty(0, dtype=np.int64)
 
@@ -490,9 +495,8 @@ def _fill_stratum(
 
 
 def _degree_weights(pos_pairs, n_proteins) -> np.ndarray:
-    """Per-protein sampling probability, proportional to positive degree
-    (i.e. to its negative-degree cap, a fixed multiple of that degree).
-    Every protein has degree > 0, so no zero-weight case to guard against."""
+    """Per-protein sampling probability, proportional to positive degree (i.e. to its negative-degree cap,
+    a fixed multiple of that degree). Every protein has degree > 0, so no zero-weight case to guard against."""
     d_plus = _degree_array(pos_pairs, n_proteins)
     return d_plus / d_plus.sum()
 
@@ -508,18 +512,15 @@ def _subsample_candidate_pairs(
     go_sizes=None,
     given_pairs=None,
 ) -> np.ndarray:
-    """Randomly draw n_target unique (i,j) pairs (i<=j), excluding positives,
-    without materializing the full upper-triangle. Used when the full
-    complement is too large to enumerate.
+    """Randomly draw n_target unique (i,j) pairs (i<=j), excluding positives, without materializing the full
+    upper-triangle. Used when the full complement is too large to enumerate.
 
-    given_pairs: sample from this fixed pool (--candidate-network) instead
-    of the whole n_proteins**2 space; kept whole if already <= n_target.
-    Self-pairs are force-kept if --lambda-self-loop > 0. The same-/
-    cross-species budget is stratified to the positive set's ratio if
-    taxon_codes is given, and nonzero-Jaccard pairs are prioritized if
-    go_membership/go_sizes is given. Throughout, proteins are drawn
-    proportional to their negative-degree cap (_degree_weights), not
-    uniformly, so low-cap proteins aren't wasted on unusable candidates."""
+    given_pairs: sample from this fixed pool (--candidate-network) instead of the whole n_proteins**2 space
+    * Self-pairs are force-kept if --lambda-self-loop > 0.
+    * The same-/cross-species budget is stratified to the positive set's ratio if taxon_codes is given,
+    * Nonzero-Jaccard pairs are prioritized if go_membership/go_sizes is given.
+    * Throughout, proteins are drawn proportional to their negative-degree cap (_degree_weights), not uniformly,
+    so low-cap proteins aren't wasted on unusable candidates."""
     rng = np.random.default_rng(seed)
     weights = _degree_weights(pos_pairs, n_proteins)
     pos_keys = (
@@ -656,8 +657,7 @@ def _unique_proteins(pairs) -> np.ndarray:
 
 
 def _degree_array(pairs, n_proteins) -> np.ndarray:
-    """Per-protein interaction degree; self-loops contribute 1 (not 2),
-    matching the convention used by _build_incidence."""
+    """Per-protein interaction degree; self-loops contribute 1 (not 2)"""
     deg = np.zeros(n_proteins, dtype=np.float64)
     if len(pairs):
         i_arr, j_arr = pairs[:, 0], pairs[:, 1]
@@ -668,8 +668,7 @@ def _degree_array(pairs, n_proteins) -> np.ndarray:
 
 
 def _same_species_ratio(pairs, n_proteins, taxon_codes) -> np.ndarray:
-    """Per-protein fraction of interactions that are same-species (a
-    self-interaction counts as same-species). NaN for proteins with none."""
+    """Per-protein fraction of interactions that are same-species. NaN for proteins with none."""
     same = np.zeros(n_proteins, dtype=np.float64)
     total = np.zeros(n_proteins, dtype=np.float64)
     if len(pairs):
@@ -694,9 +693,8 @@ def _fmt_degree_stats(deg: np.ndarray) -> str:
 
 
 def print_objective_breakdown(name, diag: dict) -> None:
-    """Print each term's share of the objective, so it's obvious when one
-    term (e.g. an unsatisfiable self-loop target) is silently dominating and
-    crowding out the others, even when their lambdas are set equal."""
+    """Print each term's share of the objective, so it's obvious when one term (e.g. an unsatisfiable self-loop
+    target) is silently dominating and crowding out the others, even when their lambdas are set equal."""
     obj = diag["obj_value"]
     terms = [
         ("confidence", diag["confidence_term"]),
@@ -713,9 +711,8 @@ def print_objective_breakdown(name, diag: dict) -> None:
 
 
 def print_dataset_stats(name, pos_pairs, neg_pairs, ctx: "BuildContext", cfg: SamplingConfig) -> None:
-    """Print pos-vs-neg stats for one split. Protein counts always shown;
-    the rest gated on which --lambda-* biases are active, since that data
-    is only loaded when needed."""
+    """Print pos-vs-neg stats for one split. Protein counts always shown; the rest gated on which --lambda-* biases
+    are active, since that data is only loaded when needed."""
     print(f"\n=== Dataset stats: {name} ===")
 
     print(f"PPIs                  -- positive: {len(pos_pairs)}   negative: {len(neg_pairs)}")
@@ -763,9 +760,8 @@ def print_dataset_stats(name, pos_pairs, neg_pairs, ctx: "BuildContext", cfg: Sa
 
 @dataclass
 class BuildContext:
-    """Everything the bias terms may need. Expensive derived fields
-    (taxonomy codes, GO membership) are populated lazily via the ensure_*
-    methods, only when a bias term actually requests them."""
+    """Everything the bias terms may need. Expensive derived fields (taxonomy codes, GO membership) are populated
+    lazily via the ensure_* methods, only when a bias term actually requests them."""
 
     n_proteins: int
     candidates: np.ndarray
@@ -848,9 +844,8 @@ def build_context(
     n_taxa=None,
     go_bp=None,
 ) -> BuildContext:
-    """taxonomy_codes/n_taxa/go_bp let a caller that already loaded them pass
-    them straight through, instead of ensure_taxonomy()/ensure_go_bp()
-    re-reading the same files."""
+    """taxonomy_codes/n_taxa/go_bp let a caller that already loaded them pass them straight through, instead of
+    ensure_taxonomy()/ensure_go_bp() re-reading the same files."""
     n_proteins = len(protein_to_idx)
     n_pos = len(pos_pairs)
     n_neg = int(round(neg_ratio * n_pos))
@@ -892,8 +887,8 @@ class BiasTerm:
         raise NotImplementedError
 
     def build(self, x: cp.Variable, ctx: BuildContext):
-        """Return (aux_vars, constraints, objective_expr) already scaled by
-        lambda_weight / U. The caller multiplies by alpha_bias when summing."""
+        """Return (aux_vars, constraints, objective_expr) already scaled by lambda_weight / U. The caller multiplies
+        by alpha_bias when summing."""
         raise NotImplementedError
 
     def debug_rows(self, x_value, ctx: BuildContext) -> list:
@@ -1187,9 +1182,8 @@ class TaxonPairBias(BiasTerm):
 
 
 def assemble_active_biases(cfg: SamplingConfig):
-    """Return (confidence_term, [bias terms with lambda > 0]). Whether each
-    ends up active (nonzero U, data available) is decided later by
-    precompute()/is_active()."""
+    """Return (confidence_term, [bias terms with lambda > 0]). Whether each ends up active (nonzero U,
+    data available) is decided later by precompute()/is_active()."""
     confidence = ConfidenceLoss()
     biases = []
     if cfg.lambda_degree > 0:
@@ -1216,8 +1210,8 @@ _TERM_KEY = {
 
 
 def _max_degree_cap(ctx: BuildContext) -> np.ndarray:
-    """Per-protein hard cap on total negative degree: neg_ratio * (1 +
-    MAX_DEGREE_SLACK) * d_plus. See MAX_DEGREE_SLACK at the top of the file."""
+    """Per-protein hard cap on total negative degree: neg_ratio * (1 + MAX_DEGREE_SLACK) * d_plus. See
+    MAX_DEGREE_SLACK at the top of the file."""
     dplus = _degree_array(ctx.pos_pairs, ctx.n_proteins)
     return ctx.r * (1.0 + MAX_DEGREE_SLACK) * dplus
 
@@ -1373,8 +1367,8 @@ DIAG_COLUMNS = [
 
 
 def write_diagnostics(rows, out_path, id_) -> None:
-    """Sample/ID qualify each row so this merges cleanly across datasets in
-    the combined MultiQC report, like Classifier Performance."""
+    """Sample/ID qualify each row so this merges cleanly across datasets in the combined MultiQC report,
+    like Classifier Performance."""
     fieldnames = ["Sample", "ID"] + DIAG_COLUMNS
     with open(out_path, "w", newline="") as fh:
         fh.write(
@@ -1395,8 +1389,8 @@ def write_diagnostics(rows, out_path, id_) -> None:
 
 
 def write_neg_generalstats(diag, out_path, id_) -> None:
-    """Writes to the same shared 'neg_generalstats' id as sample_negatives.py,
-    so ILP-sampled datasets appear in the combined General Statistics table too."""
+    """Writes to the same shared 'neg_generalstats' id as sample_negatives.py, so ILP-sampled datasets appear in the
+    combined General Statistics table too."""
     sample = mqc_sample(id_, diag.get("split", ""))
     with open(out_path, "w") as fh:
         fh.write(
@@ -1425,8 +1419,8 @@ RESIDUAL_COLUMNS = ["split", "protein_id", "taxon", "d_plus", "d_minus", "residu
 
 
 def write_residuals(rows, out_path, id_) -> None:
-    """Same Sample/ID qualification as write_diagnostics; residuals are
-    per-protein so Sample also includes protein_id to stay unique."""
+    """Same Sample/ID qualification as write_diagnostics; residuals are per-protein so Sample also includes
+    protein_id to stay unique."""
     fieldnames = ["Sample", "ID"] + RESIDUAL_COLUMNS
     with open(out_path, "w", newline="") as fh:
         fh.write(
@@ -1470,8 +1464,8 @@ def sample_negatives_ilp(
     pos_pairs = pos_pairs_from_rows(pos_ppis, protein_to_idx)
     pos_pairs_set = {tuple(p) for p in pos_pairs.tolist()}
 
-    # Pre-load what active biases need, so an over-budget subsample can use it
-    # (not a uniform draw); also passed to build_context to avoid re-reads.
+    # Pre-load what active biases need, so an over-budget subsample can use it (not a uniform draw); also passed to
+    # build_context to avoid re-reads.
     taxonomy_relevant = (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0) or (
         cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0
     )
