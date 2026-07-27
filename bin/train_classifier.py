@@ -37,7 +37,6 @@ HP_CONFIGS = [
 ]
 
 
-
 def build_X(pairs, labels, embeddings):
     """Return (X, y), silently dropping pairs where either protein is missing."""
     rows, y = [], []
@@ -57,13 +56,13 @@ def build_X(pairs, labels, embeddings):
 def compute_metrics(y_true, y_prob):
     y_pred = (y_prob >= 0.5).astype(int)
     return {
-        "auroc":     roc_auc_score(y_true, y_prob),
-        "auprc":     average_precision_score(y_true, y_prob),
-        "f1":        f1_score(y_true, y_pred, zero_division=0),
-        "mcc":       matthews_corrcoef(y_true, y_pred),
+        "auroc": roc_auc_score(y_true, y_prob),
+        "auprc": average_precision_score(y_true, y_prob),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
+        "mcc": matthews_corrcoef(y_true, y_pred),
         "precision": precision_score(y_true, y_pred, zero_division=0),
-        "recall":    recall_score(y_true, y_pred, zero_division=0),
-        "accuracy":  accuracy_score(y_true, y_pred),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "accuracy": accuracy_score(y_true, y_pred),
     }
 
 
@@ -101,12 +100,12 @@ def write_mqc(results, id_):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train",          required=True)
-    ap.add_argument("--val",            required=True)
-    ap.add_argument("--test_balanced",  required=True)
+    ap.add_argument("--train", required=True)
+    ap.add_argument("--val", required=True)
+    ap.add_argument("--test_balanced", required=True)
     ap.add_argument("--test_realistic", required=True)
-    ap.add_argument("--embeddings",     required=True)
-    ap.add_argument("--seed",           type=int, default=42)
+    ap.add_argument("--embeddings", required=True)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
     args = ap.parse_args()
 
@@ -115,10 +114,10 @@ def main():
     print(f"  {len(embeddings)} proteins", file=sys.stderr)
 
     train_pairs, y_train = read_labelled_csv(args.train)
-    val_pairs,   y_val   = read_labelled_csv(args.val)
+    val_pairs, y_val = read_labelled_csv(args.val)
 
     X_train, y_train = build_X(train_pairs, y_train, embeddings)
-    X_val,   y_val   = build_X(val_pairs,   y_val,   embeddings)
+    X_val, y_val = build_X(val_pairs, y_val, embeddings)
 
     # Hyperparameter search on val AUROC
     print("Tuning hyperparameters ...", file=sys.stderr)
@@ -134,8 +133,8 @@ def main():
     print(f"Best: {best_cfg}  (val AUROC {best_auroc:.4f})", file=sys.stderr)
 
     # Retrain on train + val combined
-    X_all     = np.concatenate([X_train, X_val])
-    y_all     = np.concatenate([y_train, y_val])
+    X_all = np.concatenate([X_train, X_val])
+    y_all = np.concatenate([y_train, y_val])
     final_clf = RandomForestClassifier(**best_cfg, random_state=args.seed, n_jobs=-1)
     final_clf.fit(X_all, y_all)
 
@@ -143,8 +142,8 @@ def main():
     results = []
     for name, path in [("test_balanced", args.test_balanced), ("test_realistic", args.test_realistic)]:
         pairs, y_test_raw = read_labelled_csv(path)
-        X_test, y_test    = build_X(pairs, y_test_raw, embeddings)
-        y_prob            = final_clf.predict_proba(X_test)[:, 1]
+        X_test, y_test = build_X(pairs, y_test_raw, embeddings)
+        y_prob = final_clf.predict_proba(X_test)[:, 1]
         metrics = compute_metrics(y_test, y_prob)
         results.append((name, metrics))
         print(

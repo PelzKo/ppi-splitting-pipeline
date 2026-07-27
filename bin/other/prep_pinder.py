@@ -61,10 +61,10 @@ def fetch_entry_fasta(pdb_id, retries=3):
             if exc.code == 404:
                 return None
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
         except urllib.error.URLError:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
     return None
 
 
@@ -127,8 +127,7 @@ print(f"Loaded {len(rcsb_cache)} cached PDB FASTA entries from {RCSB_CACHE}")
 to_fetch = [pdb_id for pdb_id in pdb_ids if pdb_id not in rcsb_cache]
 
 if to_fetch:
-    print(f"Fetching {len(to_fetch)} PDB entries not in the cache "
-          f"(using {RCSB_WORKERS} concurrent workers)...")
+    print(f"Fetching {len(to_fetch)} PDB entries not in the cache " f"(using {RCSB_WORKERS} concurrent workers)...")
     with open(RCSB_CACHE, "a") as cache_fh, ThreadPoolExecutor(max_workers=RCSB_WORKERS) as pool:
         futures = {pool.submit(fetch_entry_fasta, pdb_id): pdb_id for pdb_id in to_fetch}
         for i, future in enumerate(as_completed(futures), start=1):
@@ -142,8 +141,8 @@ if to_fetch:
             if i % 100 == 0:
                 print(f"  ...{i}/{len(to_fetch)} new PDB entries fetched")
 
-sequences = {}      # id (uniprot:chain) -> sequence
-seq_to_id = {}      # (uniprot, sequence) -> id, so identical chains share one id
+sequences = {}  # id (uniprot:chain) -> sequence
+seq_to_id = {}  # (uniprot, sequence) -> id, so identical chains share one id
 id_to_uniprot = {}  # id -> the uniprot accession it was resolved from
 protein1, protein2 = {}, {}  # row index -> id
 missing_pdb, missing_chain = set(), set()
@@ -212,18 +211,24 @@ if (~has_sequence).any():
 pinder_index = pinder_index[has_sequence]
 
 # redundancy-reduce: protein1-protein2 and protein2-protein1 are the same pair, keep one
-pair_key = pinder_index[["protein1", "protein2"]].min(axis=1) + "\t" + pinder_index[["protein1", "protein2"]].max(axis=1)
+pair_key = (
+    pinder_index[["protein1", "protein2"]].min(axis=1) + "\t" + pinder_index[["protein1", "protein2"]].max(axis=1)
+)
 pinder_index = pinder_index[~pair_key.duplicated(keep="first")]
 print(f"Remaining entries after redundancy-reducing protein1/protein2 pairs: {len(pinder_index)}")
 
-pinder_index[["protein1", "protein2", "uniprot_L", "uniprot_R", "pdb_id", "chain_L", "chain_R"]].to_csv(CSV_OUT, index=False)
+pinder_index[["protein1", "protein2", "uniprot_L", "uniprot_R", "pdb_id", "chain_L", "chain_R"]].to_csv(
+    CSV_OUT, index=False
+)
 print(f"Wrote {len(pinder_index)} rows to {CSV_OUT}")
 
 protein_ids = sorted(set(pinder_index["protein1"]) | set(pinder_index["protein2"]))
 uniprot_for_id = {pid: id_to_uniprot[pid] for pid in protein_ids}
 uniprot_accessions = sorted(set(uniprot_for_id.values()))
-print(f"Fetching taxonomy and GO annotations for {len(uniprot_accessions)} unique UniProt accessions "
-      f"({len(protein_ids)} ids)...")
+print(
+    f"Fetching taxonomy and GO annotations for {len(uniprot_accessions)} unique UniProt accessions "
+    f"({len(protein_ids)} ids)..."
+)
 
 canonical_map = build_canonical_map(uniprot_accessions)
 canonicals = sorted(canonical_map.keys())
@@ -234,8 +239,10 @@ for i in range(0, len(canonicals), BATCH_SIZE):
     try:
         _, go, sp = parse_batch(fetch_batch(batch, include_sequence=False), include_sequence=False)
     except InvalidAccessionBatch:
-        print(f"  Batch rejected (contains an accession UniProt doesn't recognize); "
-              f"retrying the {len(batch)} accessions individually...")
+        print(
+            f"  Batch rejected (contains an accession UniProt doesn't recognize); "
+            f"retrying the {len(batch)} accessions individually..."
+        )
         go, sp = {}, {}
         for acc in batch:
             try:
@@ -267,10 +274,7 @@ if missing_uniprot:
 # the sequence file: every id sharing a uniprot accession gets that accession's
 # taxonomy/GO (GO/taxonomy don't vary by chain or crystallized fragment)
 species_by_id = {pid: all_species.get(uniprot_for_id[pid], "") for pid in protein_ids}
-go_by_id = {
-    pid: all_go.get(uniprot_for_id[pid], {"BP": set(), "MF": set(), "CC": set()})
-    for pid in protein_ids
-}
+go_by_id = {pid: all_go.get(uniprot_for_id[pid], {"BP": set(), "MF": set(), "CC": set()}) for pid in protein_ids}
 
 write_species_tsv(SPECIES_OUT, protein_ids, species_by_id)
 print(f"Wrote species (taxon IDs) for {len(protein_ids)} ids to {SPECIES_OUT}")

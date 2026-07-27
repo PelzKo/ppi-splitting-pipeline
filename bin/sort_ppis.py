@@ -44,7 +44,6 @@ def write_mqc(split_results, id_, n_ppis_discarded):
         fh.write(f"{mqc_category('discarded')}\t0\t{n_ppis_discarded}\t0\n")
 
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ppis", required=True)
@@ -57,11 +56,7 @@ def main():
     partition_list = read_partition(args.partition)
 
     # node_id is 1-indexed; partition_list is 0-indexed
-    prot_to_part = {
-        node_to_prot[nid]: partition_list[nid - 1]
-        for nid in node_to_prot
-        if nid - 1 < len(partition_list)
-    }
+    prot_to_part = {node_to_prot[nid]: partition_list[nid - 1] for nid in node_to_prot if nid - 1 < len(partition_list)}
 
     ppis = read_ppis(args.ppis)
     seqs = read_fasta(args.fasta)
@@ -80,8 +75,7 @@ def main():
     ranked = sorted(part_ppis.keys(), key=lambda p: len(part_ppis[p]), reverse=True)
     if len(ranked) < 3:
         print(
-            f"Warning: only {len(ranked)} non-empty partition(s) found; "
-            "remaining splits will be empty",
+            f"Warning: only {len(ranked)} non-empty partition(s) found; " "remaining splits will be empty",
             file=sys.stderr,
         )
 
@@ -101,7 +95,6 @@ def main():
         "PPI Partitioning chart is written by REMOVE_REDUNDANT, which runs next.",
         file=sys.stderr,
     )
-
 
 
 if __name__ == "__main__":

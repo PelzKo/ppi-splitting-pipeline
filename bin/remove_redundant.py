@@ -65,12 +65,14 @@ def write_mqc(split_results, id_, n_ppis_discarded):
         fh.write(f"{mqc_category('discarded')}\t0\t{n_ppis_discarded}\t{total_cdhit_removed}\n")
 
 
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ppis", required=True,
-                    help="Original, pre-split PPI CSV -- used only to compute how many "
-                         "PPIs were discarded by KaHIP/ILP for the PPI Partitioning chart")
+    ap.add_argument(
+        "--ppis",
+        required=True,
+        help="Original, pre-split PPI CSV -- used only to compute how many "
+        "PPIs were discarded by KaHIP/ILP for the PPI Partitioning chart",
+    )
     ap.add_argument("--train_ppis", required=True)
     ap.add_argument("--val_ppis", required=True)
     ap.add_argument("--test_ppis", required=True)
@@ -85,36 +87,36 @@ def main():
     n_input = len(read_ppis(args.ppis))
 
     train_seqs = read_fasta(args.train_fasta)
-    val_seqs   = read_fasta(args.val_fasta)
-    test_seqs  = read_fasta(args.test_fasta)
+    val_seqs = read_fasta(args.val_fasta)
+    test_seqs = read_fasta(args.test_fasta)
 
     train_ppis = read_ppis(args.train_ppis)
-    val_ppis   = read_ppis(args.val_ppis)
-    test_ppis  = read_ppis(args.test_ppis)
+    val_ppis = read_ppis(args.val_ppis)
+    test_ppis = read_ppis(args.test_ppis)
 
     # IDs to keep (sequences in CD-HIT-2D output = NOT similar to the reference)
-    val_keep  = fasta_ids(args.sim_train_val)
+    val_keep = fasta_ids(args.sim_train_val)
     test_keep = fasta_ids(args.sim_train_test)
 
     train_prot_nr = set(train_seqs)
-    val_prot_nr   = set(val_seqs)  & val_keep
-    test_prot_nr  = set(test_seqs) & test_keep
+    val_prot_nr = set(val_seqs) & val_keep
+    test_prot_nr = set(test_seqs) & test_keep
 
     train_ppis_nr = filter_ppis(train_ppis, train_prot_nr)
-    val_ppis_nr   = filter_ppis(val_ppis,   val_prot_nr)
-    test_ppis_nr  = filter_ppis(test_ppis,  test_prot_nr)
+    val_ppis_nr = filter_ppis(val_ppis, val_prot_nr)
+    test_ppis_nr = filter_ppis(test_ppis, test_prot_nr)
 
     write_ppi_csv(train_ppis_nr, "train_nr.csv")
-    write_ppi_csv(val_ppis_nr,   "val_nr.csv")
-    write_ppi_csv(test_ppis_nr,  "test_nr.csv")
+    write_ppi_csv(val_ppis_nr, "val_nr.csv")
+    write_ppi_csv(test_ppis_nr, "test_nr.csv")
     write_fasta(train_seqs, train_prot_nr, "train_nr.fasta")
-    write_fasta(val_seqs,   val_prot_nr,   "val_nr.fasta")
-    write_fasta(test_seqs,  test_prot_nr,  "test_nr.fasta")
+    write_fasta(val_seqs, val_prot_nr, "val_nr.fasta")
+    write_fasta(test_seqs, test_prot_nr, "test_nr.fasta")
 
     for name, ppis, prot in [
         ("train_nr", train_ppis_nr, train_prot_nr),
-        ("val_nr",   val_ppis_nr,   val_prot_nr),
-        ("test_nr",  test_ppis_nr,  test_prot_nr),
+        ("val_nr", val_ppis_nr, val_prot_nr),
+        ("test_nr", test_ppis_nr, test_prot_nr),
     ]:
         print(f"{name}: {len(ppis)} PPIs, {len(prot)} proteins", file=sys.stderr)
 
@@ -123,23 +125,27 @@ def main():
     # without threading it in from SORT_PPIS/SOLVE_ILP.
     n_ppis_discarded = n_input - (len(train_ppis) + len(val_ppis) + len(test_ppis))
 
-    write_mqc([
-        {
-            "name": "train",
-            "n_ppis_nr": len(train_ppis_nr),
-            "n_ppis_removed": 0,
-        },
-        {
-            "name": "val",
-            "n_ppis_nr": len(val_ppis_nr),
-            "n_ppis_removed": len(val_ppis) - len(val_ppis_nr),
-        },
-        {
-            "name": "test",
-            "n_ppis_nr": len(test_ppis_nr),
-            "n_ppis_removed": len(test_ppis) - len(test_ppis_nr),
-        },
-    ], args.id, n_ppis_discarded)
+    write_mqc(
+        [
+            {
+                "name": "train",
+                "n_ppis_nr": len(train_ppis_nr),
+                "n_ppis_removed": 0,
+            },
+            {
+                "name": "val",
+                "n_ppis_nr": len(val_ppis_nr),
+                "n_ppis_removed": len(val_ppis) - len(val_ppis_nr),
+            },
+            {
+                "name": "test",
+                "n_ppis_nr": len(test_ppis_nr),
+                "n_ppis_removed": len(test_ppis) - len(test_ppis_nr),
+            },
+        ],
+        args.id,
+        n_ppis_discarded,
+    )
 
 
 if __name__ == "__main__":
