@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """ILP-based bias-aware negative sampling for PPI splits.
 
-Alternative to sample_negatives.py: chooses the negative set by solving a
-mixed-integer linear program that matches per-protein per-taxon interaction
-counts, self-interaction counts, and mean GO-BP Jaccard similarity between the
-positive and negative sets, subject to a confidence-weighted preference for
-high-confidence non-interactions. See sample_negatives_SPEC.md and
-ppi_negative_sampling_ilp.tex for the full derivation.
+Alternative to sample_negatives.py: solves a MILP that matches per-protein per-taxon degree, self-interaction count,
+and mean GO-BP Jaccard similarity between positive and negative sets, weighted toward high-confidence non-interactions.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,17 +24,15 @@ import cvxpy as cp
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import mqc_sample, read_ppis  # noqa: E402
 
-# Hard cap on each protein's total negative degree (see build_problem):
-# mx_p <= neg_ratio * (1 + MAX_DEGREE_SLACK) * d_plus_p. Needed because the
-# soft --lambda-degree penalty is one aggregate residual normalized across all
-# proteins, so it alone can't stop a few proteins from absorbing the whole
-# pos/neg degree-mass mismatch.
+# Hard per-protein cap on negative degree (see build_problem): mx_p <= neg_ratio * (1 + MAX_DEGREE_SLACK) * d_plus_p
+# so that individual proteins don't absorb all the --lambda-degree penalty
 MAX_DEGREE_SLACK = 5
 
 
 # ============================================================
 # 1. Config & CLI
 # ============================================================
+
 
 @dataclass
 class SamplingConfig:
@@ -62,16 +57,20 @@ def parse_args(argv=None) -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--config", default=None,
-                     help="YAML file overriding the built-in default weights/solver options")
 
     ap.add_argument("--positives", required=True, help="Positive PPI CSV for this split")
     ap.add_argument("--output", required=True, help="Output labelled CSV for this split")
-    ap.add_argument("--split-name", default=None,
-                     help="Label for this split in diagnostics output "
-                          "(default: derived from --output filename)")
-    ap.add_argument("--neg-ratio", type=float, default=1.0,
-                     help="|NEG| / |POS| for this split (default 1.0)")
+    ap.add_argument(
+        "--split-name",
+        default=None,
+        help="Label for this split in diagnostics output " "(default: derived from --output filename)",
+    )
+    ap.add_argument(
+        "--neg-ratio",
+        type=float,
+        default=1.0,
+        help="|NEG| / |POS| for this split (default 1.0)",
+    )
 
     # shared inputs
     ap.add_argument("--species", default=None)
@@ -90,16 +89,19 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--degree-bias-mode", choices=["unified", "split"], default="unified")
 
     # solver
-    ap.add_argument("--solver", choices=["auto", "gurobi", "scip", "highs"], default=None)
+    ap.add_argument("--solver", choices=["auto", "gurobi", "scip", "highs"], default="auto")
     ap.add_argument("--time-limit", type=float, default=200)
-    ap.add_argument("--mip-gap", type=float, default=None)
-    ap.add_argument("--threads", type=int, default=None)
-    ap.add_argument("--max-candidates", type=int, default=None)
+    ap.add_argument("--mip-gap", type=float, default=0.01)
+    ap.add_argument("--threads", type=int, default=1)
+    ap.add_argument("--max-candidates", type=int, default=50_000_000)
 
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--diagnostics-out", default="neg_sampling_ilp_mqc.tsv")
-    ap.add_argument("--residuals-out", default="neg_sampling_ilp_residuals_mqc.tsv",
-                     help="Per-protein degree residual TSV, written only with --verbose")
+    ap.add_argument(
+        "--residuals-out",
+        default="neg_sampling_ilp_residuals_mqc.tsv",
+        help="Per-protein degree residual TSV, written only with --verbose",
+    )
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
 
@@ -123,43 +125,32 @@ def _validate_config(cfg: SamplingConfig) -> None:
             raise ValueError(f"--{flag} must be >= 0 (got {val})")
 
 
-def config_from_args(args: argparse.Namespace) -> tuple[SamplingConfig, dict]:
-    """Build a SamplingConfig from CLI args, falling back to --config YAML,
-    falling back to the built-in defaults. CLI > YAML > default."""
-    yaml_cfg: dict = {}
-    if getattr(args, "config", None):
-        import yaml
-        with open(args.config) as fh:
-            yaml_cfg = yaml.safe_load(fh) or {}
-
-    def pick(cli_val, key, default):
-        if cli_val is not None:
-            return cli_val
-        return yaml_cfg.get(key, default)
-
+def config_from_args(args: argparse.Namespace) -> SamplingConfig:
+    """Build a SamplingConfig from CLI args (argparse already carries the defaults)."""
     cfg = SamplingConfig(
-        alpha_confidence=pick(args.alpha_confidence, "alpha_confidence", 1.0),
-        alpha_bias=pick(args.alpha_bias, "alpha_bias", 0.0),
-        lambda_degree=pick(args.lambda_degree, "lambda_degree", 0.0),
-        lambda_taxon_pair=pick(args.lambda_taxon_pair, "lambda_taxon_pair", 0.0),
-        lambda_self_loop=pick(args.lambda_self_loop, "lambda_self_loop", 0.0),
-        lambda_jaccard=pick(args.lambda_jaccard, "lambda_jaccard", 0.0),
-        degree_bias_mode=pick(args.degree_bias_mode, "degree_bias_mode", "unified"),
-        solver=pick(args.solver, "solver", "auto"),
-        time_limit=pick(args.time_limit, "time_limit", 200),
-        mip_gap=pick(args.mip_gap, "mip_gap", 0.01),
-        threads=pick(args.threads, "threads", 1),
-        seed=pick(args.seed, "seed", 42),
-        max_candidates=pick(args.max_candidates, "max_candidates", 50_000_000),
-        verbose=bool(args.verbose),
+        alpha_confidence=args.alpha_confidence,
+        alpha_bias=args.alpha_bias,
+        lambda_degree=args.lambda_degree,
+        lambda_taxon_pair=args.lambda_taxon_pair,
+        lambda_self_loop=args.lambda_self_loop,
+        lambda_jaccard=args.lambda_jaccard,
+        degree_bias_mode=args.degree_bias_mode,
+        solver=args.solver,
+        time_limit=args.time_limit,
+        mip_gap=args.mip_gap,
+        threads=args.threads,
+        seed=args.seed,
+        max_candidates=args.max_candidates,
+        verbose=args.verbose,
     )
     _validate_config(cfg)
-    return cfg, yaml_cfg
+    return cfg
 
 
 # ============================================================
 # 2. Data loading
 # ============================================================
+
 
 def build_protein_index(rows):
     """Return (protein_to_idx, idx_to_protein) covering every protein in `rows`."""
@@ -171,16 +162,12 @@ def pos_pairs_from_rows(rows, protein_to_idx) -> np.ndarray:
     """Return (n_pos, 2) int64 array of (i, j) with i <= j."""
     if not rows:
         return np.zeros((0, 2), dtype=np.int64)
-    pairs = [
-        (protein_to_idx[r["protein1"]], protein_to_idx[r["protein2"]])
-        for r in rows
-    ]
+    pairs = [(protein_to_idx[r["protein1"]], protein_to_idx[r["protein2"]]) for r in rows]
     return np.array([(min(i, j), max(i, j)) for i, j in pairs], dtype=np.int64)
 
 
 def load_species(path, protein_to_idx) -> np.ndarray:
-    """Return an object array of taxon-id strings, one per protein index.
-    Proteins absent from the file get "" (treated as their own taxon bucket)."""
+    """Return an object array of taxon-id strings, one per protein index. Proteins absent from the file get "" """
     taxon_map = {}
     with open(path) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
@@ -211,8 +198,8 @@ def load_go_bp(path, protein_to_idx) -> list:
 
 
 def load_confidence(path, protein_to_idx) -> dict:
-    """Return {(i,j): w} for pairs in the confidence CSV that fall within the
-    protein universe. Pairs not present here default to w=1 elsewhere."""
+    """Return {(i,j): w} for pairs in the confidence CSV that fall within the protein universe.
+    Pairs not present here default to w=1 elsewhere."""
     conf = {}
     with open(path) as fh:
         for row in csv.DictReader(fh):
@@ -227,22 +214,9 @@ def load_confidence(path, protein_to_idx) -> dict:
 def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingConfig):
     """Read a pre-supplied candidate network CSV (protein1,protein2[,w]).
 
-    Returns (candidates (n,2) int64 sorted array, confidence_override dict or
-    None). Restricts to the given protein universe and excludes positives.
-
-    The file-derived pairs are then run through _subsample_candidate_pairs
-    (via its given_pairs parameter) exactly like the auto-generated pool is:
-    if there are more than --max-candidates, they're subsampled down --
-    weighted by each protein's own negative-degree cap, not a plain uniform
-    row sample, for the same reason the auto-generated pool is (a flat
-    sample gives every protein roughly the same representation regardless of
-    its cap, which can make the ILP infeasible even when the pool is
-    nominally large enough). If the file has fewer pairs than
-    --max-candidates, all of them are kept. Either way, --lambda-self-loop
-    > 0 self-pairs are forced in on top by that same function, so
-    self-interactions are always candidates regardless of what the supplied
-    network happens to cover.
-    """
+    Returns (candidates, confidence_override) restricted to the protein universe, excluding positives.
+    Oversized files are subsampled via _subsample_candidate_pairs (same degree-weighted logic, and forced-in
+    self-pairs, as the auto-generated pool)."""
     pairs = set()
     weights = {}
     with open(path) as fh:
@@ -267,16 +241,22 @@ def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingCon
             "--candidate-network has %s pairs, exceeding --max-candidates=%s; "
             "subsampling %s pairs from it (weighted toward each protein's own "
             "negative-degree cap, not uniformly).",
-            f"{len(network_pairs):,}", f"{cfg.max_candidates:,}", f"{cfg.max_candidates:,}",
+            f"{len(network_pairs):,}",
+            f"{cfg.max_candidates:,}",
+            f"{cfg.max_candidates:,}",
         )
 
     n_proteins = len(protein_to_idx)
     pos_pairs_arr = (
-        np.array(sorted(pos_pairs_set), dtype=np.int64)
-        if pos_pairs_set else np.zeros((0, 2), dtype=np.int64)
+        np.array(sorted(pos_pairs_set), dtype=np.int64) if pos_pairs_set else np.zeros((0, 2), dtype=np.int64)
     )
     candidates = _subsample_candidate_pairs(
-        n_proteins, pos_pairs_arr, cfg.max_candidates, cfg, seed=cfg.seed, given_pairs=network_pairs,
+        n_proteins,
+        pos_pairs_arr,
+        cfg.max_candidates,
+        cfg,
+        seed=cfg.seed,
+        given_pairs=network_pairs,
     )
 
     if weights:
@@ -290,17 +270,20 @@ def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingCon
 # 3. Candidate enumeration
 # ============================================================
 
-def build_candidate_set(n_proteins, pos_pairs, cfg: SamplingConfig, max_candidates=50_000_000, seed=42,
-                         taxon_codes=None, go_membership=None, go_sizes=None) -> np.ndarray:
-    """Return (n_cand, 2) int array of (i, j) with i <= j, upper-triangle,
-    excluding positives, sorted ascending by (i, j). Vectorized (no Python
-    loop over candidate pairs).
 
-    If the full complement would exceed max_candidates, warns and returns an
-    informed random subsample of that size instead of enumerating every pair
-    (which would itself blow the memory budget --max-candidates guards
-    against). See _subsample_candidate_pairs for how `cfg`, `taxon_codes` and
-    `go_membership`/`go_sizes` shape that subsample."""
+def build_candidate_set(
+    n_proteins,
+    pos_pairs,
+    cfg: SamplingConfig,
+    max_candidates=50_000_000,
+    seed=42,
+    taxon_codes=None,
+    go_membership=None,
+    go_sizes=None,
+) -> np.ndarray:
+    """Return (n_cand, 2) sorted (i<=j) upper-triangle array, excluding positives. Vectorized; delegates to
+    _subsample_candidate_pairs instead of enumerating the full complement if that would exceed max_candidates.
+    """
     print(f"Number of unique PPIs in the positive set: {len(pos_pairs)}")
     n_pairs_full = n_proteins * (n_proteins + 1) // 2
     n_est = n_pairs_full - len(pos_pairs)
@@ -310,11 +293,19 @@ def build_candidate_set(n_proteins, pos_pairs, cfg: SamplingConfig, max_candidat
             "subsampling %s random candidate pairs instead of the full complement. "
             "Supply --candidate-network to restrict the pool deliberately, or raise "
             "--max-candidates if you have the memory.",
-            f"{n_est:,}", f"{max_candidates:,}", f"{max_candidates:,}",
+            f"{n_est:,}",
+            f"{max_candidates:,}",
+            f"{max_candidates:,}",
         )
         return _subsample_candidate_pairs(
-            n_proteins, pos_pairs, max_candidates, cfg, seed=seed,
-            taxon_codes=taxon_codes, go_membership=go_membership, go_sizes=go_sizes,
+            n_proteins,
+            pos_pairs,
+            max_candidates,
+            cfg,
+            seed=seed,
+            taxon_codes=taxon_codes,
+            go_membership=go_membership,
+            go_sizes=go_sizes,
         )
     i_idx, j_idx = np.triu_indices(n_proteins)
     if len(pos_pairs):
@@ -326,8 +317,7 @@ def build_candidate_set(n_proteins, pos_pairs, cfg: SamplingConfig, max_candidat
 
 
 def _missing_self_pairs(n_proteins, pos_pairs) -> np.ndarray:
-    """(k, 2) array of every (i, i) that is not already a positive
-    self-interaction."""
+    """(k, 2) array of every (i, i) that is not already a positive self-interaction."""
     all_i = np.arange(n_proteins, dtype=np.int64)
     if len(pos_pairs):
         pi, pj = pos_pairs[:, 0], pos_pairs[:, 1]
@@ -337,8 +327,8 @@ def _missing_self_pairs(n_proteins, pos_pairs) -> np.ndarray:
 
 
 def _positive_same_species_fraction(pos_pairs, taxon_codes) -> float:
-    """Fraction of positive pairs that are same-species (a self-interaction
-    counts as same-species), edge-level (not averaged per protein)."""
+    """Fraction of positive pairs that are same-species (a self-interaction counts as same-species), edge-level
+    (not averaged per protein)."""
     if len(pos_pairs) == 0:
         return 0.0
     i_arr, j_arr = pos_pairs[:, 0], pos_pairs[:, 1]
@@ -346,23 +336,28 @@ def _positive_same_species_fraction(pos_pairs, taxon_codes) -> float:
 
 
 def _filter_same_species(keys, bi, bj, taxon_codes, want_same):
-    """Restrict (keys, bi, bj) to same-species (want_same=True) or
-    cross-species (want_same=False) pairs per taxon_codes; shared by
-    _fill_stratum and _fill_stratum_from_pool."""
+    """Restrict (keys, bi, bj) to same-species (want_same=True) or cross-species (want_same=False) pairs
+    per taxon_codes; shared by _fill_stratum and _fill_stratum_from_pool."""
     same_mask = taxon_codes[bi] == taxon_codes[bj]
     keep_mask = same_mask if want_same else ~same_mask
     return keys[keep_mask], bi[keep_mask], bj[keep_mask]
 
 
-def _fill_stratum_from_pool(pool_keys, n_proteins, exclude_keys, quota, rng,
-                             taxon_codes=None, want_same=None,
-                             go_membership=None, go_sizes=None, weights=None) -> np.ndarray:
-    """Like _fill_stratum, but the eligible population is already fully known
-    (`pool_keys`, e.g. a user-supplied --candidate-network) instead of the
-    whole n_proteins**2 space -- so instead of _fill_stratum's
-    generate-random-batches-and-reject loop (which would rarely hit a
-    pool that's sparse relative to n_proteins**2), this filters `pool_keys`
-    directly and draws a single weighted sample without replacement."""
+def _fill_stratum_from_pool(
+    pool_keys,
+    n_proteins,
+    exclude_keys,
+    quota,
+    rng,
+    taxon_codes=None,
+    want_same=None,
+    go_membership=None,
+    go_sizes=None,
+    weights=None,
+) -> np.ndarray:
+    """Like _fill_stratum, but samples from an already-known `pool_keys` (e.g. --candidate-network) via direct weighted
+    sampling, instead of _fill_stratum's generate-and-reject loop (too inefficient for a pool sparse relative to
+    n_proteins**2)."""
     keys = pool_keys
     if len(exclude_keys):
         keys = keys[~np.isin(keys, exclude_keys, assume_unique=True)]
@@ -399,46 +394,49 @@ def _fill_stratum_from_pool(pool_keys, n_proteins, exclude_keys, quota, rng,
     return np.sort(keys[chosen])
 
 
-def _fill_stratum(rng, n_proteins, exclude_keys, quota, taxon_codes=None, want_same=None,
-                   go_membership=None, go_sizes=None, weights=None, pool_keys=None,
-                   max_rounds=200) -> np.ndarray:
-    """Draw up to `quota` unique (i, j) keys (i <= j, encoded as i*n_proteins+j)
-    via repeated random batches, excluding `exclude_keys` (e.g. positives).
+def _fill_stratum(
+    rng,
+    n_proteins,
+    exclude_keys,
+    quota,
+    taxon_codes=None,
+    want_same=None,
+    go_membership=None,
+    go_sizes=None,
+    weights=None,
+    pool_keys=None,
+    max_rounds=200,
+) -> np.ndarray:
+    """Draw up to `quota` unique (i,j) keys (encoded i*n_proteins+j) via
+    repeated random batches, excluding `exclude_keys` (e.g. positives).
 
-    If `want_same` is not None, restrict to same-species (True) or
-    cross-species (False) pairs per `taxon_codes` -- used to stratify a
-    subsample so a much-larger cross-species population can't swamp the
-    much-rarer same-species one. If `go_membership`/`go_sizes` are given,
-    pairs with nonzero GO-BP Jaccard are always kept first (they're rare in
-    a uniform draw but are what's needed to hit a nonzero target mean),
-    with plain draws filling out the rest of the quota.
+    want_same: restrict to same-/cross-species pairs (stratifies the rare
+    same-species population against the much larger cross-species one).
+    go_membership/go_sizes: keep nonzero GO-BP Jaccard pairs first (rare
+    under a uniform draw). weights: sample proteins proportional to their
+    negative-degree cap instead of uniformly, so low-cap proteins aren't
+    wasted past their cap. pool_keys: sample from a fixed known pool
+    (--candidate-network) via _fill_stratum_from_pool instead of
+    generate-and-reject.
 
-    If `weights` is given (a length-n_proteins probability array), proteins
-    are drawn proportionally to it instead of uniformly -- pass each
-    protein's hard negative-degree cap (see _max_degree_cap) so that a
-    low-degree protein doesn't end up with as many candidate edges, on
-    average, as a high-degree one. Plain uniform sampling gives every
-    protein roughly the same number of candidates regardless of its cap,
-    which wastes almost all of a low-cap protein's share (any candidate
-    beyond its cap can never be selected) and can make the ILP infeasible
-    even when the candidate pool is nominally large enough.
-
-    If `pool_keys` is given (a sorted array of i*n_proteins+j keys, e.g. from
-    a user-supplied --candidate-network), sampling is restricted to that
-    fixed, already-known pool via _fill_stratum_from_pool instead of the
-    generate-and-reject loop below, which would be far too inefficient for a
-    pool that's sparse relative to n_proteins**2.
-
-    Returns fewer than `quota` keys (with a warning) if this stratum's true
-    population turns out to be smaller, after `max_rounds` batches."""
+    Returns fewer than `quota` (with a warning) if the true population is
+    smaller after `max_rounds` batches."""
     if quota <= 0:
         return np.empty(0, dtype=np.int64)
 
     if pool_keys is not None:
-        return _fill_stratum_from_pool(pool_keys, n_proteins, exclude_keys, quota, rng,
-                                        taxon_codes=taxon_codes, want_same=want_same,
-                                        go_membership=go_membership, go_sizes=go_sizes,
-                                        weights=weights)
+        return _fill_stratum_from_pool(
+            pool_keys,
+            n_proteins,
+            exclude_keys,
+            quota,
+            rng,
+            taxon_codes=taxon_codes,
+            want_same=want_same,
+            go_membership=go_membership,
+            go_sizes=go_sizes,
+            weights=weights,
+        )
 
     priority_keys = np.empty(0, dtype=np.int64)
     filler_keys = np.empty(0, dtype=np.int64)
@@ -481,75 +479,61 @@ def _fill_stratum(rng, n_proteins, exclude_keys, quota, taxon_codes=None, want_s
             "Could not fill a candidate stratum (quota=%d) after %d sampling "
             "rounds; its true population is likely smaller than requested. "
             "Using the %d candidates found.",
-            quota, max_rounds, len(priority_keys) + len(filler_keys),
+            quota,
+            max_rounds,
+            len(priority_keys) + len(filler_keys),
         )
 
     if len(priority_keys) >= quota:
         return priority_keys[:quota]
-    return np.union1d(priority_keys, filler_keys[:quota - len(priority_keys)])
+    return np.union1d(priority_keys, filler_keys[: quota - len(priority_keys)])
 
 
 def _degree_weights(pos_pairs, n_proteins) -> np.ndarray:
-    """Per-protein sampling probability, proportional to each protein's hard
-    negative-degree cap (see _max_degree_cap) -- i.e. proportional to its
-    positive degree, since the cap is that degree times a fixed constant.
-
-    Every protein passed through build_protein_index appears in at least one
-    positive pair, so every weight is > 0; no zero-probability/divide-by-zero
-    case to guard against."""
+    """Per-protein sampling probability, proportional to positive degree
+    (i.e. to its negative-degree cap, a fixed multiple of that degree).
+    Every protein has degree > 0, so no zero-weight case to guard against."""
     d_plus = _degree_array(pos_pairs, n_proteins)
     return d_plus / d_plus.sum()
 
 
-def _subsample_candidate_pairs(n_proteins, pos_pairs, n_target, cfg: SamplingConfig, seed=42,
-                                taxon_codes=None, go_membership=None, go_sizes=None,
-                                given_pairs=None) -> np.ndarray:
-    """Randomly draw n_target unique (i, j) pairs with i <= j, excluding
-    positives, without ever materializing the full upper-triangle. Used when
-    the full complement is too large to enumerate directly.
+def _subsample_candidate_pairs(
+    n_proteins,
+    pos_pairs,
+    n_target,
+    cfg: SamplingConfig,
+    seed=42,
+    taxon_codes=None,
+    go_membership=None,
+    go_sizes=None,
+    given_pairs=None,
+) -> np.ndarray:
+    """Randomly draw n_target unique (i,j) pairs (i<=j), excluding positives,
+    without materializing the full upper-triangle. Used when the full
+    complement is too large to enumerate.
 
-    If `given_pairs` is supplied (an (n, 2) array, e.g. a user-supplied
-    --candidate-network), sampling is restricted to that fixed pool instead
-    of generating fresh random pairs over the whole n_proteins**2 space --
-    see _fill_stratum's pool_keys parameter. If `given_pairs` has no more
-    than n_target rows to begin with, all of it is kept (no subsampling
-    needed).
-
-    Sampling is informed by whichever biases are actually active:
-    - If --lambda-self-loop > 0, every non-positive self-pair (i, i) is
-      always kept first, even past n_target if necessary -- regardless of
-      whether it's present in `given_pairs`, so self-interactions are always
-      candidates even if a supplied network doesn't happen to cover them.
-      Skipped entirely otherwise, since there's then no reason to force
-      them in.
-    - If `taxon_codes` is given (a taxonomy-relevant bias is active), the
-      remaining budget is stratified into same-/cross-species portions
-      matching the ratio observed in the positive set, instead of one
-      uniform draw that a much-larger cross-species population would swamp.
-    - If `go_membership`/`go_sizes` are given (--lambda-jaccard > 0),
-      nonzero-Jaccard pairs encountered while filling each stratum (or the
-      whole budget, if taxonomy isn't active) are always kept first.
-
-    Proteins are drawn (or, with `given_pairs`, pairs are weighted)
-    proportionally to their own negative-degree cap (see _degree_weights),
-    not uniformly -- a uniform draw/sample hands every protein roughly the
-    same number of candidates regardless of its cap, so a low-degree
-    (low-cap) protein ends up with mostly-unusable candidates (anything past
-    its cap can never be selected), which can make the ILP infeasible even
-    when the pool is nominally large enough overall.
-    """
+    given_pairs: sample from this fixed pool (--candidate-network) instead
+    of the whole n_proteins**2 space; kept whole if already <= n_target.
+    Self-pairs are force-kept if --lambda-self-loop > 0. The same-/
+    cross-species budget is stratified to the positive set's ratio if
+    taxon_codes is given, and nonzero-Jaccard pairs are prioritized if
+    go_membership/go_sizes is given. Throughout, proteins are drawn
+    proportional to their negative-degree cap (_degree_weights), not
+    uniformly, so low-cap proteins aren't wasted on unusable candidates."""
     rng = np.random.default_rng(seed)
     weights = _degree_weights(pos_pairs, n_proteins)
     pos_keys = (
         np.sort(pos_pairs[:, 0].astype(np.int64) * n_proteins + pos_pairs[:, 1].astype(np.int64))
-        if len(pos_pairs) else np.empty(0, dtype=np.int64)
+        if len(pos_pairs)
+        else np.empty(0, dtype=np.int64)
     )
 
     pool_keys = None
     if given_pairs is not None:
         pool_keys = (
             np.sort(given_pairs[:, 0].astype(np.int64) * n_proteins + given_pairs[:, 1].astype(np.int64))
-            if len(given_pairs) else np.empty(0, dtype=np.int64)
+            if len(given_pairs)
+            else np.empty(0, dtype=np.int64)
         )
 
     self_keys = np.empty(0, dtype=np.int64)
@@ -562,23 +546,56 @@ def _subsample_candidate_pairs(n_proteins, pos_pairs, n_target, cfg: SamplingCon
         same_ratio = _positive_same_species_fraction(pos_pairs, taxon_codes)
         n_same = int(round(same_ratio * remaining))
         n_cross = remaining - n_same
-        same_keys = _fill_stratum(rng, n_proteins, pos_keys, n_same, taxon_codes=taxon_codes,
-                                   want_same=True, go_membership=go_membership, go_sizes=go_sizes,
-                                   weights=weights, pool_keys=pool_keys)
-        cross_keys = _fill_stratum(rng, n_proteins, pos_keys, n_cross, taxon_codes=taxon_codes,
-                                    want_same=False, go_membership=go_membership, go_sizes=go_sizes,
-                                    weights=weights, pool_keys=pool_keys)
+        same_keys = _fill_stratum(
+            rng,
+            n_proteins,
+            pos_keys,
+            n_same,
+            taxon_codes=taxon_codes,
+            want_same=True,
+            go_membership=go_membership,
+            go_sizes=go_sizes,
+            weights=weights,
+            pool_keys=pool_keys,
+        )
+        cross_keys = _fill_stratum(
+            rng,
+            n_proteins,
+            pos_keys,
+            n_cross,
+            taxon_codes=taxon_codes,
+            want_same=False,
+            go_membership=go_membership,
+            go_sizes=go_sizes,
+            weights=weights,
+            pool_keys=pool_keys,
+        )
         drawn_keys = np.union1d(same_keys, cross_keys)
         shortfall = remaining - len(drawn_keys)
         if shortfall > 0:
             exclude = np.union1d(pos_keys, np.union1d(self_keys, drawn_keys))
-            drawn_keys = np.union1d(drawn_keys,
-                                     _fill_stratum(rng, n_proteins, exclude, shortfall, weights=weights,
-                                                   pool_keys=pool_keys))
+            drawn_keys = np.union1d(
+                drawn_keys,
+                _fill_stratum(
+                    rng,
+                    n_proteins,
+                    exclude,
+                    shortfall,
+                    weights=weights,
+                    pool_keys=pool_keys,
+                ),
+            )
     else:
-        drawn_keys = _fill_stratum(rng, n_proteins, pos_keys, remaining,
-                                    go_membership=go_membership, go_sizes=go_sizes, weights=weights,
-                                    pool_keys=pool_keys)
+        drawn_keys = _fill_stratum(
+            rng,
+            n_proteins,
+            pos_keys,
+            remaining,
+            go_membership=go_membership,
+            go_sizes=go_sizes,
+            weights=weights,
+            pool_keys=pool_keys,
+        )
 
     keys = np.union1d(self_keys, drawn_keys)
 
@@ -622,9 +639,7 @@ def _build_go_membership(go_bp) -> tuple[sp.csr_matrix, np.ndarray]:
         for t in s:
             rows.append(p)
             cols.append(term_to_col[t])
-    membership = sp.csr_matrix(
-        (np.ones(len(rows)), (rows, cols)), shape=(len(go_bp), len(terms))
-    )
+    membership = sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(len(go_bp), len(terms)))
     sizes = np.asarray(membership.sum(axis=1)).ravel()
     return membership, sizes
 
@@ -632,6 +647,7 @@ def _build_go_membership(go_bp) -> tuple[sp.csr_matrix, np.ndarray]:
 # ============================================================
 # 3b. Descriptive dataset stats (pos vs. neg)
 # ============================================================
+
 
 def _unique_proteins(pairs) -> np.ndarray:
     if len(pairs) == 0:
@@ -697,10 +713,9 @@ def print_objective_breakdown(name, diag: dict) -> None:
 
 
 def print_dataset_stats(name, pos_pairs, neg_pairs, ctx: "BuildContext", cfg: SamplingConfig) -> None:
-    """Print pos-vs-neg comparison stats for one split. Protein counts are
-    always shown; the rest are gated on which --lambda-* biases were
-    requested, since the underlying data (species, GO terms) is only loaded
-    when a bias actually needs it."""
+    """Print pos-vs-neg stats for one split. Protein counts always shown;
+    the rest gated on which --lambda-* biases are active, since that data
+    is only loaded when needed."""
     print(f"\n=== Dataset stats: {name} ===")
 
     print(f"PPIs                  -- positive: {len(pos_pairs)}   negative: {len(neg_pairs)}")
@@ -720,9 +735,8 @@ def print_dataset_stats(name, pos_pairs, neg_pairs, ctx: "BuildContext", cfg: Sa
         print(f"Degree (positive)     -- {_fmt_degree_stats(deg_pos)}")
         print(f"Degree (negative)     -- {_fmt_degree_stats(deg_neg)}")
 
-    species_used = (
-        (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0)
-        or (cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0)
+    species_used = (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0) or (
+        cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0
     )
     if species_used and ctx.species_path is not None:
         taxon_codes, _ = ctx.ensure_taxonomy()
@@ -746,11 +760,13 @@ def print_dataset_stats(name, pos_pairs, neg_pairs, ctx: "BuildContext", cfg: Sa
 # 4. BuildContext + BiasTerm interface
 # ============================================================
 
+
 @dataclass
 class BuildContext:
     """Everything the bias terms may need. Expensive derived fields
     (taxonomy codes, GO membership) are populated lazily via the ensure_*
     methods, only when a bias term actually requests them."""
+
     n_proteins: int
     candidates: np.ndarray
     pos_pairs: np.ndarray
@@ -818,24 +834,41 @@ class BuildContext:
         return self.confidence_arr
 
 
-def build_context(pos_pairs, protein_to_idx, idx_to_protein, candidates, neg_ratio,
-                   species_path=None, go_annotations_path=None,
-                   confidence_path=None, confidence_override=None,
-                   taxonomy_codes=None, n_taxa=None, go_bp=None) -> BuildContext:
-    """taxonomy_codes/n_taxa/go_bp let a caller that already loaded them (e.g.
-    to inform candidate subsampling) hand them straight to the context,
-    instead of BuildContext.ensure_taxonomy()/ensure_go_bp() re-reading the
-    same files from disk a second time."""
+def build_context(
+    pos_pairs,
+    protein_to_idx,
+    idx_to_protein,
+    candidates,
+    neg_ratio,
+    species_path=None,
+    go_annotations_path=None,
+    confidence_path=None,
+    confidence_override=None,
+    taxonomy_codes=None,
+    n_taxa=None,
+    go_bp=None,
+) -> BuildContext:
+    """taxonomy_codes/n_taxa/go_bp let a caller that already loaded them pass
+    them straight through, instead of ensure_taxonomy()/ensure_go_bp()
+    re-reading the same files."""
     n_proteins = len(protein_to_idx)
     n_pos = len(pos_pairs)
     n_neg = int(round(neg_ratio * n_pos))
     incidence = _build_incidence(n_proteins, candidates)
     ctx = BuildContext(
-        n_proteins=n_proteins, candidates=candidates, pos_pairs=pos_pairs,
-        n_pos=n_pos, n_neg=n_neg, r=neg_ratio, incidence=incidence,
-        protein_to_idx=protein_to_idx, idx_to_protein=idx_to_protein,
-        species_path=species_path, go_annotations_path=go_annotations_path,
-        confidence_path=confidence_path, confidence_override=confidence_override,
+        n_proteins=n_proteins,
+        candidates=candidates,
+        pos_pairs=pos_pairs,
+        n_pos=n_pos,
+        n_neg=n_neg,
+        r=neg_ratio,
+        incidence=incidence,
+        protein_to_idx=protein_to_idx,
+        idx_to_protein=idx_to_protein,
+        species_path=species_path,
+        go_annotations_path=go_annotations_path,
+        confidence_path=confidence_path,
+        confidence_override=confidence_override,
     )
     if taxonomy_codes is not None:
         ctx.taxonomy_codes = taxonomy_codes
@@ -869,6 +902,7 @@ class BiasTerm:
 
 class ConfidenceLoss(BiasTerm):
     """Always active. term = (1/|NEG|) * sum (1-w_ij) x_ij, in [0,1]."""
+
     name = "confidence"
 
     def __init__(self):
@@ -937,6 +971,7 @@ class JaccardMeanBias(BiasTerm):
 
 class UnifiedDegreeTaxonBias(BiasTerm):
     """Variant A: per-protein per-taxon matching in a single term."""
+
     name = "deg_unified"
 
     def precompute(self, ctx: BuildContext) -> None:
@@ -1009,18 +1044,21 @@ class UnifiedDegreeTaxonBias(BiasTerm):
         for k in range(self.n_groups):
             p = int(self.group_keys[k] // (self.n_taxa + 1))
             t = int(self.group_keys[k] % (self.n_taxa + 1))
-            rows.append({
-                "protein_id": ctx.idx_to_protein[p],
-                "taxon": str(t),
-                "d_plus": float(self._dplus[k]),
-                "d_minus": float(mx[k]),
-                "residual": float(mx[k] - self.target[k]),
-            })
+            rows.append(
+                {
+                    "protein_id": ctx.idx_to_protein[p],
+                    "taxon": str(t),
+                    "d_plus": float(self._dplus[k]),
+                    "d_minus": float(mx[k]),
+                    "residual": float(mx[k] - self.target[k]),
+                }
+            )
         return rows
 
 
 class SplitAggregateDegreeBias(BiasTerm):
     """Variant B1: per-protein aggregate degree (no taxon)."""
+
     name = "deg_split"
 
     def precompute(self, ctx: BuildContext) -> None:
@@ -1071,18 +1109,21 @@ class SplitAggregateDegreeBias(BiasTerm):
         mx = np.asarray(self.M @ np.round(np.asarray(x_value))).ravel()
         rows = []
         for k, p in enumerate(self.active_idx):
-            rows.append({
-                "protein_id": ctx.idx_to_protein[int(p)],
-                "taxon": "",
-                "d_plus": float(self._dplus[k]),
-                "d_minus": float(mx[k]),
-                "residual": float(mx[k] - self.target[k]),
-            })
+            rows.append(
+                {
+                    "protein_id": ctx.idx_to_protein[int(p)],
+                    "taxon": "",
+                    "d_plus": float(self._dplus[k]),
+                    "d_minus": float(mx[k]),
+                    "residual": float(mx[k] - self.target[k]),
+                }
+            )
         return rows
 
 
 class TaxonPairBias(BiasTerm):
     """Variant B2: global taxon-pair counts."""
+
     name = "taxon_pair"
 
     def precompute(self, ctx: BuildContext) -> None:
@@ -1122,7 +1163,10 @@ class TaxonPairBias(BiasTerm):
         target = ctx.r * m_plus
         U = float(np.sum(gamma * np.maximum(target, n_cand_per_group - target)))
 
-        self.M = sp.csr_matrix((np.ones(len(group_c)), (group_c, np.arange(len(cand)))), shape=(n_groups, len(cand)))
+        self.M = sp.csr_matrix(
+            (np.ones(len(group_c)), (group_c, np.arange(len(cand)))),
+            shape=(n_groups, len(cand)),
+        )
         self.gamma = gamma
         self.target = target
         self.U = U
@@ -1141,13 +1185,11 @@ class TaxonPairBias(BiasTerm):
 # 5. Model assembly and solve
 # ============================================================
 
-def assemble_active_biases(cfg: SamplingConfig):
-    """Return (confidence_term, [requested lambda-weighted bias terms]).
 
-    A bias appears in the list purely because its lambda > 0; whether it
-    ends up *active* (nonzero U, required data available) is decided by
-    precompute()/is_active() after the fact.
-    """
+def assemble_active_biases(cfg: SamplingConfig):
+    """Return (confidence_term, [bias terms with lambda > 0]). Whether each
+    ends up active (nonzero U, data available) is decided later by
+    precompute()/is_active()."""
     confidence = ConfidenceLoss()
     biases = []
     if cfg.lambda_degree > 0:
@@ -1205,19 +1247,30 @@ def build_problem(ctx: BuildContext, confidence: ConfidenceLoss, active_biases, 
 # 5b. Solver selection
 # ============================================================
 
+
 def _solver_options(solver_name, cfg: SamplingConfig) -> dict:
     if solver_name == cp.GUROBI:
-        return {"TimeLimit": cfg.time_limit, "MIPGap": cfg.mip_gap,
-                "Threads": cfg.threads, "Seed": cfg.seed}
+        return {
+            "TimeLimit": cfg.time_limit,
+            "MIPGap": cfg.mip_gap,
+            "Threads": cfg.threads,
+            "Seed": cfg.seed,
+        }
     if solver_name == cp.HIGHS:
-        return {"time_limit": cfg.time_limit, "mip_rel_gap": cfg.mip_gap,
-                "threads": cfg.threads, "random_seed": cfg.seed}
+        return {
+            "time_limit": cfg.time_limit,
+            "mip_rel_gap": cfg.mip_gap,
+            "threads": cfg.threads,
+            "random_seed": cfg.seed,
+        }
     if solver_name == cp.SCIP:
-        return {"scip_params": {
-            "limits/time": cfg.time_limit,
-            "limits/gap": cfg.mip_gap,
-            "randomization/randomseedshift": cfg.seed,
-        }}
+        return {
+            "scip_params": {
+                "limits/time": cfg.time_limit,
+                "limits/gap": cfg.mip_gap,
+                "randomization/randomseedshift": cfg.seed,
+            }
+        }
     return {}
 
 
@@ -1237,12 +1290,15 @@ def select_solver(cfg: SamplingConfig, gurobi_license, verbose: bool):
 
     try:
         import gurobipy
+
         gurobipy.Model()  # triggers a license check
         return cp.GUROBI, _solver_options(cp.GUROBI, cfg)
     except Exception as exc:
         if verbose:
-            logging.info("Gurobi unavailable (%s); falling back to an open-source solver.",
-                         type(exc).__name__)
+            logging.info(
+                "Gurobi unavailable (%s); falling back to an open-source solver.",
+                type(exc).__name__,
+            )
 
     installed = cp.installed_solvers()
     for cand in (cp.SCIP, cp.HIGHS, cp.CBC, cp.GLPK_MI):
@@ -1263,6 +1319,7 @@ def solve(problem: cp.Problem, solver, options: dict, verbose: bool = False) -> 
 # ============================================================
 # 6. Output
 # ============================================================
+
 
 def extract_negatives(x_value, ctx: BuildContext) -> np.ndarray:
     x_val = np.asarray(x_value).ravel()
@@ -1295,10 +1352,24 @@ def write_split_csv(pos_rows, negative_pairs, idx_to_protein, out_path) -> None:
             writer.writerow(out)
 
 
-DIAG_COLUMNS = ["split", "n_pos", "n_neg", "r", "n_candidates", "obj_value",
-                "confidence_term", "bias_deg_term", "bias_tax_term",
-                "bias_self_term", "bias_jac_term", "solver", "wall_time_s",
-                "mip_gap", "status", "degree_bias_mode"]
+DIAG_COLUMNS = [
+    "split",
+    "n_pos",
+    "n_neg",
+    "r",
+    "n_candidates",
+    "obj_value",
+    "confidence_term",
+    "bias_deg_term",
+    "bias_tax_term",
+    "bias_self_term",
+    "bias_jac_term",
+    "solver",
+    "wall_time_s",
+    "mip_gap",
+    "status",
+    "degree_bias_mode",
+]
 
 
 def write_diagnostics(rows, out_path, id_) -> None:
@@ -1324,9 +1395,8 @@ def write_diagnostics(rows, out_path, id_) -> None:
 
 
 def write_neg_generalstats(diag, out_path, id_) -> None:
-    """Contribute to the same shared 'neg_generalstats' id sample_negatives.py
-    writes to, so ILP-sampled datasets show up in the combined General
-    Statistics table too, uniformly with the degree-weighted sampler."""
+    """Writes to the same shared 'neg_generalstats' id as sample_negatives.py,
+    so ILP-sampled datasets appear in the combined General Statistics table too."""
     sample = mqc_sample(id_, diag.get("split", ""))
     with open(out_path, "w") as fh:
         fh.write(
@@ -1380,20 +1450,30 @@ def write_residuals(rows, out_path, id_) -> None:
 # 7. Split driver
 # ============================================================
 
-def sample_negatives_ilp(name, pos_ppis, output_path, cfg: SamplingConfig, neg_ratio,
-                         species_path=None, go_annotations_path=None, confidence_path=None,
-                         candidate_network_path=None, gurobi_license_path=None,
-                         protein_to_idx=None, idx_to_protein=None, verbose_rows_out=None):
+
+def sample_negatives_ilp(
+    name,
+    pos_ppis,
+    output_path,
+    cfg: SamplingConfig,
+    neg_ratio,
+    species_path=None,
+    go_annotations_path=None,
+    confidence_path=None,
+    candidate_network_path=None,
+    gurobi_license_path=None,
+    protein_to_idx=None,
+    idx_to_protein=None,
+    verbose_rows_out=None,
+):
     """Sample negatives for one split. Returns (diagnostics_row, ctx)."""
     pos_pairs = pos_pairs_from_rows(pos_ppis, protein_to_idx)
     pos_pairs_set = {tuple(p) for p in pos_pairs.tolist()}
 
-    # Pre-load whatever the active biases need so an over-budget subsample
-    # (_subsample_candidate_pairs) can use it instead of a uniform draw; also
-    # handed to build_context so ensure_taxonomy()/ensure_go_bp() don't re-read.
-    taxonomy_relevant = (
-        (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0)
-        or (cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0)
+    # Pre-load what active biases need, so an over-budget subsample can use it
+    # (not a uniform draw); also passed to build_context to avoid re-reads.
+    taxonomy_relevant = (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0) or (
+        cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0
     )
     taxonomy_codes = n_taxa = None
     if taxonomy_relevant and species_path is not None:
@@ -1414,19 +1494,42 @@ def sample_negatives_ilp(name, pos_ppis, output_path, cfg: SamplingConfig, neg_r
         )
     else:
         candidates = build_candidate_set(
-            len(protein_to_idx), pos_pairs, cfg, max_candidates=cfg.max_candidates, seed=cfg.seed,
-            taxon_codes=taxonomy_codes, go_membership=go_membership, go_sizes=go_sizes,
+            len(protein_to_idx),
+            pos_pairs,
+            cfg,
+            max_candidates=cfg.max_candidates,
+            seed=cfg.seed,
+            taxon_codes=taxonomy_codes,
+            go_membership=go_membership,
+            go_sizes=go_sizes,
         )
     print(f"Candidate pool size: {len(candidates)}", file=sys.stderr)
-    print(f"Number of unique proteins in the candidate set: {np.max(candidates)}", file=sys.stderr)
-    print(f"Number of positive self-interactions: {sum(pos_pairs[:,0] == pos_pairs[:, 1])}", file=sys.stderr)
-    print(f"Number of possible self-interactions in the candidates: {sum(candidates[:,0] == candidates[:, 1])}", file=sys.stderr)
+    print(
+        f"Number of unique proteins in the candidate set: {np.max(candidates)}",
+        file=sys.stderr,
+    )
+    print(
+        f"Number of positive self-interactions: {sum(pos_pairs[:,0] == pos_pairs[:, 1])}",
+        file=sys.stderr,
+    )
+    print(
+        f"Number of possible self-interactions in the candidates: {sum(candidates[:,0] == candidates[:, 1])}",
+        file=sys.stderr,
+    )
 
     ctx = build_context(
-        pos_pairs, protein_to_idx, idx_to_protein, candidates, neg_ratio,
-        species_path=species_path, go_annotations_path=go_annotations_path,
-        confidence_path=confidence_path, confidence_override=confidence_override,
-        taxonomy_codes=taxonomy_codes, n_taxa=n_taxa, go_bp=go_bp,
+        pos_pairs,
+        protein_to_idx,
+        idx_to_protein,
+        candidates,
+        neg_ratio,
+        species_path=species_path,
+        go_annotations_path=go_annotations_path,
+        confidence_path=confidence_path,
+        confidence_override=confidence_override,
+        taxonomy_codes=taxonomy_codes,
+        n_taxa=n_taxa,
+        go_bp=go_bp,
     )
 
     if ctx.n_neg > len(ctx.candidates):
@@ -1436,8 +1539,14 @@ def sample_negatives_ilp(name, pos_ppis, output_path, cfg: SamplingConfig, neg_r
             f"or lower the negative ratio."
         )
 
-    base_diag = {"split": name, "n_pos": ctx.n_pos, "n_neg": ctx.n_neg, "r": neg_ratio,
-                 "n_candidates": len(ctx.candidates), "degree_bias_mode": cfg.degree_bias_mode}
+    base_diag = {
+        "split": name,
+        "n_pos": ctx.n_pos,
+        "n_neg": ctx.n_neg,
+        "r": neg_ratio,
+        "n_candidates": len(ctx.candidates),
+        "degree_bias_mode": cfg.degree_bias_mode,
+    }
 
     if ctx.n_pos == 0:
         raise ValueError(f"{name}: no positive pairs found in the input.")
@@ -1445,12 +1554,25 @@ def sample_negatives_ilp(name, pos_ppis, output_path, cfg: SamplingConfig, neg_r
         raise ValueError(f"{name}: no negative pairs found in the input.")
 
     if ctx.n_neg == len(ctx.candidates):
-        logging.info("%s: |NEG| == |C| (%d); selecting all candidates without solving.", name, ctx.n_neg)
+        logging.info(
+            "%s: |NEG| == |C| (%d); selecting all candidates without solving.",
+            name,
+            ctx.n_neg,
+        )
         write_split_csv(pos_ppis, ctx.candidates.tolist(), ctx.idx_to_protein, output_path)
-        diag = {**base_diag, "obj_value": 0.0, "confidence_term": 0.0,
-                "bias_deg_term": 0.0, "bias_tax_term": 0.0, "bias_self_term": 0.0,
-                "bias_jac_term": 0.0, "solver": "trivial", "wall_time_s": 0.0,
-                "mip_gap": 0.0, "status": "optimal (all candidates forced)"}
+        diag = {
+            **base_diag,
+            "obj_value": 0.0,
+            "confidence_term": 0.0,
+            "bias_deg_term": 0.0,
+            "bias_tax_term": 0.0,
+            "bias_self_term": 0.0,
+            "bias_jac_term": 0.0,
+            "solver": "trivial",
+            "wall_time_s": 0.0,
+            "mip_gap": 0.0,
+            "status": "optimal (all candidates forced)",
+        }
         print_objective_breakdown(name, diag)
         print_dataset_stats(name, ctx.pos_pairs, ctx.candidates, ctx, cfg)
         return diag, ctx
@@ -1475,14 +1597,26 @@ def sample_negatives_ilp(name, pos_ppis, output_path, cfg: SamplingConfig, neg_r
         ) from exc
     negatives_idx = extract_negatives(x.value, ctx)
 
-    term_values = {"bias_deg_term": 0.0, "bias_tax_term": 0.0, "bias_self_term": 0.0, "bias_jac_term": 0.0}
+    term_values = {
+        "bias_deg_term": 0.0,
+        "bias_tax_term": 0.0,
+        "bias_self_term": 0.0,
+        "bias_jac_term": 0.0,
+    }
     for b, scaled_expr in term_exprs:
         term_values[_TERM_KEY[b.name]] += float(scaled_expr.value)
     confidence_term = float(conf_raw.value) * cfg.alpha_confidence
 
-    diag = {**base_diag, "obj_value": result["obj_value"], "confidence_term": confidence_term,
-            **term_values, "solver": str(solver), "wall_time_s": result["wall_time_s"],
-            "mip_gap": cfg.mip_gap, "status": str(result["status"])}
+    diag = {
+        **base_diag,
+        "obj_value": result["obj_value"],
+        "confidence_term": confidence_term,
+        **term_values,
+        "solver": str(solver),
+        "wall_time_s": result["wall_time_s"],
+        "mip_gap": cfg.mip_gap,
+        "status": str(result["status"]),
+    }
 
     if verbose_rows_out is not None:
         for b, _ in term_exprs:
@@ -1497,9 +1631,11 @@ def sample_negatives_ilp(name, pos_ppis, output_path, cfg: SamplingConfig, neg_r
 
 if __name__ == "__main__":
     args = parse_args()
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
-                        format="[%(asctime)s] %(levelname)s %(message)s")
-    cfg, _ = config_from_args(args)
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="[%(asctime)s] %(levelname)s %(message)s",
+    )
+    cfg = config_from_args(args)
     split_name = args.split_name or Path(args.output).stem
 
     pos_ppis = read_ppis(args.positives)
@@ -1507,11 +1643,18 @@ if __name__ == "__main__":
 
     residual_rows = [] if cfg.verbose else None
     diag, _ = sample_negatives_ilp(
-        split_name, pos_ppis, args.output, cfg, args.neg_ratio,
-        species_path=args.species, go_annotations_path=args.go_annotations,
-        confidence_path=args.confidence, candidate_network_path=args.candidate_network,
+        split_name,
+        pos_ppis,
+        args.output,
+        cfg,
+        args.neg_ratio,
+        species_path=args.species,
+        go_annotations_path=args.go_annotations,
+        confidence_path=args.confidence,
+        candidate_network_path=args.candidate_network,
         gurobi_license_path=args.gurobi_license,
-        protein_to_idx=protein_to_idx, idx_to_protein=idx_to_protein,
+        protein_to_idx=protein_to_idx,
+        idx_to_protein=idx_to_protein,
         verbose_rows_out=residual_rows,
     )
     write_diagnostics([diag], args.diagnostics_out, args.id)
