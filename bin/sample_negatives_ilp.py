@@ -42,7 +42,6 @@ class SamplingConfig:
     lambda_taxon_pair: float = 0.0
     lambda_self_loop: float = 0.1
     lambda_jaccard: float = 0.3
-    degree_bias_mode: str = "unified"  # "unified" | "split"
     solver: str = "auto"  # "auto" | "gurobi" | "scip" | "highs"
     time_limit: float = 3600
     mip_gap: float = 0.01
@@ -86,7 +85,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--lambda-taxon-pair", type=float, default=0.0)
     ap.add_argument("--lambda-self-loop", type=float, default=0.0)
     ap.add_argument("--lambda-jaccard", type=float, default=0.0)
-    ap.add_argument("--degree-bias-mode", choices=["unified", "split"], default="unified")
 
     # solver
     ap.add_argument("--solver", choices=["auto", "gurobi", "scip", "highs"], default="auto")
@@ -109,10 +107,6 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def _validate_config(cfg: SamplingConfig) -> None:
-    if cfg.degree_bias_mode not in ("unified", "split"):
-        raise ValueError("--degree-bias-mode must be 'unified' or 'split'")
-    if cfg.degree_bias_mode == "unified" and cfg.lambda_taxon_pair != 0:
-        raise ValueError("--lambda-taxon-pair must be 0 when --degree-bias-mode=unified")
     for flag, val in [
         ("lambda-degree", cfg.lambda_degree),
         ("lambda-taxon-pair", cfg.lambda_taxon_pair),
@@ -134,7 +128,6 @@ def config_from_args(args: argparse.Namespace) -> SamplingConfig:
         lambda_taxon_pair=args.lambda_taxon_pair,
         lambda_self_loop=args.lambda_self_loop,
         lambda_jaccard=args.lambda_jaccard,
-        degree_bias_mode=args.degree_bias_mode,
         solver=args.solver,
         time_limit=args.time_limit,
         mip_gap=args.mip_gap,
@@ -732,9 +725,7 @@ def print_dataset_stats(name, pos_pairs, neg_pairs, ctx: "BuildContext", cfg: Sa
         print(f"Degree (positive)     -- {_fmt_degree_stats(deg_pos)}")
         print(f"Degree (negative)     -- {_fmt_degree_stats(deg_neg)}")
 
-    species_used = (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0) or (
-        cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0
-    )
+    species_used = cfg.lambda_taxon_pair > 0
     if species_used and ctx.species_path is not None:
         taxon_codes, _ = ctx.ensure_taxonomy()
         same_pos = _same_species_ratio(pos_pairs, ctx.n_proteins, taxon_codes)
@@ -964,93 +955,6 @@ class JaccardMeanBias(BiasTerm):
         return [z], constraints, obj
 
 
-class UnifiedDegreeTaxonBias(BiasTerm):
-    """Variant A: per-protein per-taxon matching in a single term."""
-
-    name = "deg_unified"
-
-    def precompute(self, ctx: BuildContext) -> None:
-        taxon, T = ctx.ensure_taxonomy()
-        cand = ctx.candidates
-        i_arr, j_arr = cand[:, 0], cand[:, 1]
-        n_cand = len(cand)
-        self_mask = i_arr == j_arr
-
-        row_p_c = np.concatenate([i_arr, j_arr[~self_mask]])
-        row_t_c = np.concatenate([taxon[j_arr], taxon[i_arr[~self_mask]]])
-        col_c = np.concatenate([np.arange(n_cand), np.arange(n_cand)[~self_mask]])
-        key_c = row_p_c.astype(np.int64) * (T + 1) + row_t_c.astype(np.int64)
-
-        pos = ctx.pos_pairs
-        if len(pos):
-            pi, pj = pos[:, 0], pos[:, 1]
-            pself = pi == pj
-            row_p_p = np.concatenate([pi, pj[~pself]])
-            row_t_p = np.concatenate([taxon[pj], taxon[pi[~pself]]])
-            key_p = row_p_p.astype(np.int64) * (T + 1) + row_t_p.astype(np.int64)
-        else:
-            key_p = np.zeros(0, dtype=np.int64)
-
-        self._build_groups(key_c, col_c, key_p, n_cand, T, ctx.r)
-
-    def _build_groups(self, key_c, col_c, key_p, n_cand, n_taxa, r):
-        uniq_key_c = np.unique(key_c)
-        if len(key_p):
-            uniq_key_p, pos_counts = np.unique(key_p, return_counts=True)
-        else:
-            uniq_key_p, pos_counts = np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
-        active_keys = np.union1d(uniq_key_c, uniq_key_p)
-        n_groups = len(active_keys)
-        if n_groups == 0:
-            self._active = False
-            return
-
-        group_c = np.searchsorted(active_keys, key_c)
-        group_p_idx = np.searchsorted(active_keys, uniq_key_p)
-
-        dplus = np.zeros(n_groups, dtype=np.float64)
-        dplus[group_p_idx] = pos_counts
-        n_cand_per_group = np.bincount(group_c, minlength=n_groups).astype(np.float64)
-        with np.errstate(divide="ignore"):
-            coef = np.where(dplus > 0, 1.0 / np.log1p(dplus), 1.0 / math.log(2.0))
-        target = r * dplus
-        U = float(np.sum(coef * np.maximum(target, n_cand_per_group - target)))
-
-        self.M = sp.csr_matrix((np.ones(len(group_c)), (group_c, col_c)), shape=(n_groups, n_cand))
-        self._dplus = dplus
-        self.coef = coef
-        self.target = target
-        self.U = U
-        self.n_groups = n_groups
-        self.group_keys = active_keys
-        self.n_taxa = n_taxa
-        self._active = U > 0
-
-    def build(self, x, ctx):
-        u = cp.Variable(self.n_groups, nonneg=True)
-        mx = self.M @ x
-        constraints = [u >= mx - self.target, u >= self.target - mx]
-        obj = self.lambda_weight * cp.sum(cp.multiply(self.coef, u)) / self.U
-        return [u], constraints, obj
-
-    def debug_rows(self, x_value, ctx):
-        mx = np.asarray(self.M @ np.round(np.asarray(x_value))).ravel()
-        rows = []
-        for k in range(self.n_groups):
-            p = int(self.group_keys[k] // (self.n_taxa + 1))
-            t = int(self.group_keys[k] % (self.n_taxa + 1))
-            rows.append(
-                {
-                    "protein_id": ctx.idx_to_protein[p],
-                    "taxon": str(t),
-                    "d_plus": float(self._dplus[k]),
-                    "d_minus": float(mx[k]),
-                    "residual": float(mx[k] - self.target[k]),
-                }
-            )
-        return rows
-
-
 class SplitAggregateDegreeBias(BiasTerm):
     """Variant B1: per-protein aggregate degree (no taxon)."""
 
@@ -1187,11 +1091,8 @@ def assemble_active_biases(cfg: SamplingConfig):
     confidence = ConfidenceLoss()
     biases = []
     if cfg.lambda_degree > 0:
-        if cfg.degree_bias_mode == "unified":
-            biases.append(UnifiedDegreeTaxonBias(cfg.lambda_degree))
-        else:
-            biases.append(SplitAggregateDegreeBias(cfg.lambda_degree))
-    if cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0:
+        biases.append(SplitAggregateDegreeBias(cfg.lambda_degree))
+    if cfg.lambda_taxon_pair > 0:
         biases.append(TaxonPairBias(cfg.lambda_taxon_pair))
     if cfg.lambda_self_loop > 0:
         biases.append(SelfLoopBias(cfg.lambda_self_loop))
@@ -1203,7 +1104,6 @@ def assemble_active_biases(cfg: SamplingConfig):
 _TERM_KEY = {
     "self": "bias_self_term",
     "jaccard": "bias_jac_term",
-    "deg_unified": "bias_deg_term",
     "deg_split": "bias_deg_term",
     "taxon_pair": "bias_tax_term",
 }
@@ -1362,7 +1262,6 @@ DIAG_COLUMNS = [
     "wall_time_s",
     "mip_gap",
     "status",
-    "degree_bias_mode",
 ]
 
 
@@ -1466,9 +1365,7 @@ def sample_negatives_ilp(
 
     # Pre-load what active biases need, so an over-budget subsample can use it (not a uniform draw); also passed to
     # build_context to avoid re-reads.
-    taxonomy_relevant = (cfg.degree_bias_mode == "unified" and cfg.lambda_degree > 0) or (
-        cfg.degree_bias_mode == "split" and cfg.lambda_taxon_pair > 0
-    )
+    taxonomy_relevant = cfg.lambda_taxon_pair > 0
     taxonomy_codes = n_taxa = None
     if taxonomy_relevant and species_path is not None:
         taxonomy = load_species(species_path, protein_to_idx)
@@ -1539,7 +1436,6 @@ def sample_negatives_ilp(
         "n_neg": ctx.n_neg,
         "r": neg_ratio,
         "n_candidates": len(ctx.candidates),
-        "degree_bias_mode": cfg.degree_bias_mode,
     }
 
     if ctx.n_pos == 0:

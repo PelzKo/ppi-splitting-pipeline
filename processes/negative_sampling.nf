@@ -65,7 +65,6 @@ process SAMPLE_NEGATIVES_ILP {
         --lambda-taxon-pair  ${meta.neg_ilp_lambda_taxon_pair} \\
         --lambda-self-loop   ${meta.neg_ilp_lambda_self_loop} \\
         --lambda-jaccard     ${meta.neg_ilp_lambda_jaccard} \\
-        --degree-bias-mode   ${params.neg_ilp_degree_bias_mode} \\
         --solver             ${params.neg_ilp_solver} \\
         --time-limit         ${meta.neg_ilp_time_limit} \\
         --mip-gap            ${params.neg_ilp_mip_gap} \\

@@ -209,7 +209,7 @@ string,data/string.csv,ilp,ilp,0.5,0.5
 | `neg_ilp_lambda_degree`, `neg_ilp_lambda_taxon_pair`, `neg_ilp_lambda_self_loop`, `neg_ilp_lambda_jaccard` | `params.*` of the same name | Same as above.                                                                                                    |
 
 Everything else (solver settings, Gurobi license, resource limits, seeds,
-`neg_ilp_degree_bias_mode`, ...) stays a run-wide default in
+...) stays a run-wide default in
 `nextflow.config` and is shared by every dataset in the samplesheet.
 
 **Deduplicated work across datasets.** Datasets often overlap in which
@@ -309,18 +309,17 @@ leaves them blank.
 | `negative_sampling_method`                          | `default`     | `default` (random) or `ilp`                                                                                                                                                  |
 | `candidate_network`                               | `null`        | Optional CSV (`protein1,protein2[,w]`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Required for large protein universes (see below). |
 | `neg_ilp_alpha_confidence` / `--neg_ilp_alpha_bias` | `0.3` / `0.7` | Trade-off between confidence loss and bias matching (must sum to 1)                                                                                                          |
-| `neg_ilp_lambda_degree`                           | `0.6`         | Weight of the per-protein (per-taxon, in `unified` mode) degree-matching term                                                                                                |
-| `neg_ilp_lambda_taxon_pair`                       | `0.0`         | Weight of the global taxon-pair matching term (`split` mode only)                                                                                                            |
+| `neg_ilp_lambda_degree`                           | `0.6`         | Weight of the per-protein aggregate degree-matching term                                                                                                                     |
+| `neg_ilp_lambda_taxon_pair`                       | `0.0`         | Weight of the global taxon-pair matching term                                                                                                                                |
 | `neg_ilp_lambda_self_loop`                        | `0.1`         | Weight of the self-interaction count matching term                                                                                                                           |
 | `neg_ilp_lambda_jaccard`                          | `0.3`         | Weight of the mean GO-BP Jaccard matching term                                                                                                                               |
-| `neg_ilp_degree_bias_mode`                        | `unified`     | `unified` (single per-protein-per-taxon term) or `split` (separate per-protein degree and taxon-pair terms)                                                                  |
 | `neg_ilp_solver`                                  | `auto`        | `auto`, `gurobi`, `scip`, or `highs`. `auto` tries Gurobi first, then falls back to an open-source solver.                                                                   |
 | `neg_ilp_time_limit`                              | `3600`        | Solver time limit in seconds                                                                                                                                                 |
 | `neg_ilp_mip_gap`                                 | `0.01`        | Solver MIP gap tolerance                                                                                                                                                     |
 | `gurobi_license`                                  | `null`        | Path to a Gurobi license file, only used if the `gurobi` solver is selected                                                                                                  |
 
-The active `--neg_ilp_lambda_*` weights (for the chosen `degree_bias_mode`)
-are recommended to sum to 1, but this is not enforced by the script.
+The active `--neg_ilp_lambda_*` weights are recommended to sum to 1, but this
+is not enforced by the script.
 
 For Gurobi, install it yourself and point `--gurobi_license` at your license
 file (`pip install gurobipy` is already pulled in by `environment.yml`). With
