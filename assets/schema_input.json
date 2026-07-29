@@ -128,19 +128,9 @@
         "type": "string",
         "enum": ["default", "ilp", "uniform"]
       },
-      "neg_ilp_alpha_confidence": {
-        "type": "number",
-        "minimum": 0,
-        "maximum": 1
-      },
       "neg_ilp_time_limit": {
         "type": "number",
         "minimum": 1
-      },
-      "neg_ilp_alpha_bias": {
-        "type": "number",
-        "minimum": 0,
-        "maximum": 1
       },
       "neg_ilp_lambda_degree": {
         "type": "number",

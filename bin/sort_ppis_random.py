@@ -26,12 +26,12 @@ from utils import read_fasta, read_ppis, write_fasta, write_ppi_csv
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ppis",          required=True)
-    ap.add_argument("--fasta",         required=True)
-    ap.add_argument("--train-split",   type=float, default=0.8)
-    ap.add_argument("--val-split",     type=float, default=0.1)
-    ap.add_argument("--test-split",    type=float, default=0.1)
-    ap.add_argument("--seed",          type=int, default=42)
+    ap.add_argument("--ppis", required=True)
+    ap.add_argument("--fasta", required=True)
+    ap.add_argument("--train-split", type=float, default=0.8)
+    ap.add_argument("--val-split", type=float, default=0.1)
+    ap.add_argument("--test-split", type=float, default=0.1)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
     args = ap.parse_args()
 
@@ -48,8 +48,8 @@ def main():
     # computed from --test-split directly.
     buckets = {
         "train": shuffled[:n_train],
-        "val":   shuffled[n_train:n_train + n_val],
-        "test":  shuffled[n_train + n_val:],
+        "val": shuffled[n_train : n_train + n_val],
+        "test": shuffled[n_train + n_val :],
     }
 
     split_results = []

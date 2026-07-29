@@ -9,9 +9,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-UNIPROT_URL      = "https://rest.uniprot.org/uniprotkb/search"
+UNIPROT_URL = "https://rest.uniprot.org/uniprotkb/search"
 UNIPROT_FASTA_URL = "https://rest.uniprot.org/uniprotkb/{acc}.fasta"
-UNIPARC_URL      = "https://rest.uniprot.org/uniparc/search"
+UNIPARC_URL = "https://rest.uniprot.org/uniparc/search"
 BATCH_SIZE = 100
 SEARCH_PAGE_SIZE = 500  # UniProt's documented max page size for /uniprotkb/search
 
@@ -27,6 +27,7 @@ class InvalidAccessionBatch(Exception):
 def _ssl_context():
     try:
         import certifi
+
         return ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         return ssl.create_default_context()
@@ -70,10 +71,10 @@ def fetch_isoform_sequence(acc, retries=3):
             if exc.code == 404:
                 return None
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
         except urllib.error.URLError:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
     return None
 
 
@@ -110,38 +111,32 @@ def _fetch_page(url, retries=3):
                 next_url = _next_page_url(resp.headers.get("Link"))
         except urllib.error.HTTPError as exc:
             if exc.code == 400:
-                # UniProt rejects the entire OR-joined query if any accession in
-                # it isn't valid UniProtKB format (e.g. a UniParc-only ID like a
-                # raw EMBL/GenBank protein_id). Retrying won't help.
+                # UniProt rejects the whole OR-joined query if one accession is
+                # non-UniProtKB format (e.g. a UniParc/EMBL id). Retrying won't help.
                 raise InvalidAccessionBatch(str(exc)) from exc
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
-            raise RuntimeError(
-                f"Failed to fetch page after {retries} attempts: {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to fetch page after {retries} attempts: {exc}") from exc
         except urllib.error.URLError as exc:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
-            raise RuntimeError(
-                f"Failed to fetch page after {retries} attempts: {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to fetch page after {retries} attempts: {exc}") from exc
         else:
             if _is_stream_error(text):
                 if attempt < retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
                     continue
                 raise RuntimeError(
-                    f"UniProt's search endpoint failed after {retries} attempts: "
-                    f"{text.strip()[:200]!r}"
+                    f"UniProt's search endpoint failed after {retries} attempts: " f"{text.strip()[:200]!r}"
                 )
             return text, next_url
     raise RuntimeError(f"fetch_page called with retries={retries} <= 0")
 
 
-def fetch_batch(accessions, retries=3):
-    """Batch request returning accession, sequence, GO IDs, and taxon ID as TSV.
+def fetch_batch(accessions, retries=3, include_sequence=True):
+    """Batch request returning accession, [sequence], GO IDs, and taxon ID as TSV.
 
     accessions should be canonical (no isoform suffix) to ensure UniProt matches them.
     Uses UniProt's paginated /uniprotkb/search endpoint (per their guidance for
@@ -150,14 +145,23 @@ def fetch_batch(accessions, retries=3):
     set and is more prone to being cut off by transient server-side errors.
     Follows the `Link: rel="next"` cursor until UniProt reports no more pages
     (in practice always one page here, since BATCH_SIZE <= SEARCH_PAGE_SIZE).
+
+    Pass include_sequence=False to skip the "sequence" field for callers that
+    already have sequences from elsewhere and only want taxonomy/GO -- pair
+    with parse_batch(text, include_sequence=False).
     """
+    fields = "accession,go_p,go_f,go_c,organism_id"
+    if include_sequence:
+        fields = "accession,sequence,go_p,go_f,go_c,organism_id"
     query = " OR ".join(f"accession:{acc}" for acc in accessions)
-    params = urllib.parse.urlencode({
-        "query": query,
-        "format": "tsv",
-        "fields": "accession,sequence,go_p,go_f,go_c,organism_id",
-        "size": SEARCH_PAGE_SIZE,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "query": query,
+            "format": "tsv",
+            "fields": fields,
+            "size": SEARCH_PAGE_SIZE,
+        }
+    )
     url = f"{UNIPROT_URL}?{params}"
 
     header = None
@@ -182,11 +186,13 @@ def fetch_uniparc_entry(acc, retries=3):
     UniParc is a sequence archive, not a curated database, so it has no GO
     annotations - callers only get sequence + taxonomy back for these IDs.
     """
-    params = urllib.parse.urlencode({
-        "query": f"dbid:{acc}",
-        "format": "tsv",
-        "fields": "organism_id,sequence",
-    })
+    params = urllib.parse.urlencode(
+        {
+            "query": f"dbid:{acc}",
+            "format": "tsv",
+            "fields": "organism_id,sequence",
+        }
+    )
     req = urllib.request.Request(f"{UNIPARC_URL}?{params}")
     for attempt in range(retries):
         try:
@@ -200,10 +206,10 @@ def fetch_uniparc_entry(acc, retries=3):
             if exc.code == 400:
                 return None
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
         except urllib.error.URLError:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
     return None
 
 
@@ -211,24 +217,57 @@ def _parse_go(raw):
     return {t.strip() for t in raw.split(";") if t.strip()}
 
 
-def parse_batch(text):
-    """Return ({accession: sequence}, {accession: {BP/MF/CC: set}}, {accession: taxon_id})."""
+def parse_batch(text, include_sequence=True):
+    """Return ({accession: sequence}, {accession: {BP/MF/CC: set}}, {accession: taxon_id}).
+
+    The sequence dict is empty when include_sequence=False, matching the
+    columns fetch_batch(..., include_sequence=False) actually requested.
+    """
+    go_col = 2 if include_sequence else 1
     seqs, go, species = {}, {}, {}
     lines = text.splitlines()
     for line in lines[1:]:  # skip header row
         parts = line.split("\t")
-        if len(parts) < 5:
+        if len(parts) < go_col + 3:
             continue
         acc = parts[0].strip()
         if acc:
-            seqs[acc] = parts[1].strip()
+            if include_sequence:
+                seqs[acc] = parts[1].strip()
             go[acc] = {
-                "BP": _parse_go(parts[2]),
-                "MF": _parse_go(parts[3]),
-                "CC": _parse_go(parts[4]),
+                "BP": _parse_go(parts[go_col]),
+                "MF": _parse_go(parts[go_col + 1]),
+                "CC": _parse_go(parts[go_col + 2]),
             }
-            species[acc] = parts[5].strip() if len(parts) > 5 else ""
+            species_col = go_col + 3
+            species[acc] = parts[species_col].strip() if len(parts) > species_col else ""
     return seqs, go, species
+
+
+def write_species_tsv(path, protein_ids, species):
+    """Write a protein_id/taxon_id TSV, in protein_ids order."""
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(["protein_id", "taxon_id"])
+        for acc in protein_ids:
+            writer.writerow([acc, species.get(acc, "")])
+
+
+def write_go_tsv(path, protein_ids, go):
+    """Write a protein_id/go_bp/go_mf/go_cc TSV, in protein_ids order."""
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(["protein_id", "go_bp", "go_mf", "go_cc"])
+        for acc in protein_ids:
+            cats = go.get(acc, {"BP": set(), "MF": set(), "CC": set()})
+            writer.writerow(
+                [
+                    acc,
+                    ";".join(sorted(cats.get("BP", set()))),
+                    ";".join(sorted(cats.get("MF", set()))),
+                    ";".join(sorted(cats.get("CC", set()))),
+                ]
+            )
 
 
 def main():
@@ -240,8 +279,7 @@ def main():
     canonical_map = build_canonical_map(proteins)
     canonicals = sorted(canonical_map.keys())
     print(
-        f"Fetching data for {len(proteins)} proteins "
-        f"({len(canonicals)} canonical accessions) from UniProt...",
+        f"Fetching data for {len(proteins)} proteins " f"({len(canonicals)} canonical accessions) from UniProt...",
         file=sys.stderr,
     )
 
@@ -297,15 +335,14 @@ def main():
     for canon, originals in canonical_map.items():
         for acc in originals:
             if canon in canon_seqs:
-                all_seqs[acc]    = canon_seqs[canon]
-                all_go[acc]      = canon_go.get(canon, {"BP": set(), "MF": set(), "CC": set()})
+                all_seqs[acc] = canon_seqs[canon]
+                all_go[acc] = canon_go.get(canon, {"BP": set(), "MF": set(), "CC": set()})
                 all_species[acc] = canon_species.get(canon, "")
 
     # Isoforms may have distinct sequences — fetch each individually.
     isoforms = [acc for acc in proteins if "-" in acc]
     if isoforms:
-        print(f"Fetching isoform-specific sequences for {len(isoforms)} isoforms...",
-              file=sys.stderr)
+        print(f"Fetching isoform-specific sequences for {len(isoforms)} isoforms...", file=sys.stderr)
         for acc in isoforms:
             seq = fetch_isoform_sequence(acc)
             if seq:
@@ -324,23 +361,8 @@ def main():
             if acc in all_seqs:
                 fh.write(f">{acc}\n{all_seqs[acc]}\n")
 
-    with open(go_out, "w", newline="") as fh:
-        writer = csv.writer(fh, delimiter="\t")
-        writer.writerow(["protein_id", "go_bp", "go_mf", "go_cc"])
-        for acc in proteins:
-            cats = all_go.get(acc, {"BP": set(), "MF": set(), "CC": set()})
-            writer.writerow([
-                acc,
-                ";".join(sorted(cats.get("BP", set()))),
-                ";".join(sorted(cats.get("MF", set()))),
-                ";".join(sorted(cats.get("CC", set()))),
-            ])
-
-    with open(species_out, "w", newline="") as fh:
-        writer = csv.writer(fh, delimiter="\t")
-        writer.writerow(["protein_id", "taxon_id"])
-        for acc in proteins:
-            writer.writerow([acc, all_species.get(acc, "")])
+    write_go_tsv(go_out, proteins, all_go)
+    write_species_tsv(species_out, proteins, all_species)
 
     print(f"Written {len(all_seqs)} sequences to {fasta_out}", file=sys.stderr)
     print(f"Written GO annotations for {len(proteins)} proteins to {go_out}", file=sys.stderr)

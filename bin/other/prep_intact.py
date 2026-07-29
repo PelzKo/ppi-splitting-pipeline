@@ -1,8 +1,18 @@
 """intact.zip downloaded from https://www.ebi.ac.uk/intact/download/ftp"""
+
 import pandas as pd
 
-intact = pd.read_csv("~/Downloads/intact/intact.txt", sep = "\t")
-intact = intact[["#ID(s) interactor A", "ID(s) interactor B", "Interaction detection method(s)", "Taxid interactor A", "Taxid interactor B", "Interaction type(s)"]]
+intact = pd.read_csv("~/Downloads/intact/intact.txt", sep="\t")
+intact = intact[
+    [
+        "#ID(s) interactor A",
+        "ID(s) interactor B",
+        "Interaction detection method(s)",
+        "Taxid interactor A",
+        "Taxid interactor B",
+        "Interaction type(s)",
+    ]
+]
 intact_filtered = intact[intact["#ID(s) interactor A"].str.startswith("uniprotkb")]
 intact_filtered = intact_filtered[intact_filtered["ID(s) interactor B"].str.startswith("uniprotkb")]
 intact_filtered.columns = ["protein1", "protein2", "method", "taxid1", "taxid2", "type"]

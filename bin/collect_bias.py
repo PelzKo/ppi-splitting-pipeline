@@ -11,19 +11,17 @@ The attribute name is derived from the filename: {attribute}_bias_mqc.tsv
 """
 
 import argparse
-import csv
 import sys
 from pathlib import Path
 
 import plotly.graph_objects as go
 
-_SET2 = ["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3",
-         "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3"]
+_SET2 = ["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3"]
 
 _SPLIT_SYMBOLS = {
-    "train":          "circle",
-    "val":            "square",
-    "test_balanced":  "diamond",
+    "train": "circle",
+    "val": "square",
+    "test_balanced": "diamond",
     "test_realistic": "triangle-up",
 }
 
@@ -75,35 +73,41 @@ def main():
             ys.append(mi)
             symbols.append(_SPLIT_SYMBOLS.get(split, "circle"))
             hover_splits.append(split)
-        fig.add_trace(go.Scatter(
-            x=xs, y=ys,
-            mode="markers",
-            name=attr,
-            customdata=hover_splits,
-            marker=dict(
-                color=color_map[attr],
-                symbol=symbols,
-                size=10,
-                line=dict(color="white", width=1),
-            ),
-            hovertemplate=(
-                f"<b>{attr}</b><br>"
-                "Split: %{customdata}<br>"
-                "Detectability: %{x:.3f}<br>"
-                "NMI: %{y:.4f}<extra></extra>"
-            ),
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="markers",
+                name=attr,
+                customdata=hover_splits,
+                marker=dict(
+                    color=color_map[attr],
+                    symbol=symbols,
+                    size=10,
+                    line=dict(color="white", width=1),
+                ),
+                hovertemplate=(
+                    f"<b>{attr}</b><br>"
+                    "Split: %{customdata}<br>"
+                    "Detectability: %{x:.3f}<br>"
+                    "NMI: %{y:.4f}<extra></extra>"
+                ),
+            )
+        )
 
     for j, (split, symbol) in enumerate(_SPLIT_SYMBOLS.items()):
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None],
-            mode="markers",
-            name=split,
-            legendgroup="_splits",
-            legendgrouptitle=dict(text="Split") if j == 0 else None,
-            showlegend=True,
-            marker=dict(color="gray", symbol=symbol, size=10),
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                name=split,
+                legendgroup="_splits",
+                legendgrouptitle=dict(text="Split") if j == 0 else None,
+                showlegend=True,
+                marker=dict(color="gray", symbol=symbol, size=10),
+            )
+        )
 
     fig.update_layout(
         xaxis_title="Detectability (Ridge Spearman ρ)",

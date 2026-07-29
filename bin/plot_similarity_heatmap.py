@@ -69,9 +69,12 @@ def make_html(mat, split_labels, output, id_):
 
     # Discrete 3-colour scale: 0→train, 1→val, 2→test
     ann_colorscale = [
-        [0.000, palette["train"]], [0.333, palette["train"]],
-        [0.334, palette["val"]],   [0.666, palette["val"]],
-        [0.667, palette["test"]],  [1.000, palette["test"]],
+        [0.000, palette["train"]],
+        [0.333, palette["train"]],
+        [0.334, palette["val"]],
+        [0.666, palette["val"]],
+        [0.667, palette["test"]],
+        [1.000, palette["test"]],
     ]
 
     col_nums = [[label_to_num[l] for l in split_labels]]
@@ -79,13 +82,15 @@ def make_html(mat, split_labels, output, id_):
 
     shared_ann = dict(
         colorscale=ann_colorscale,
-        zmin=0, zmax=2,
+        zmin=0,
+        zmax=2,
         showscale=False,
         hoverinfo="skip",
     )
 
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=2,
+        cols=2,
         column_widths=[0.025, 0.975],
         row_heights=[0.025, 0.975],
         horizontal_spacing=0.003,
@@ -118,14 +123,16 @@ def make_html(mat, split_labels, output, id_):
             ),
             hovertemplate="bitscore: %{z:.1f}<extra></extra>",
         ),
-        row=2, col=2,
+        row=2,
+        col=2,
     )
 
     # Legend for annotation colours (dummy scatter traces)
     for split, colour in palette.items():
         fig.add_trace(
             go.Scatter(
-                x=[None], y=[None],
+                x=[None],
+                y=[None],
                 mode="markers",
                 name=split,
                 marker=dict(color=colour, size=10, symbol="square"),
@@ -162,13 +169,13 @@ def make_html(mat, split_labels, output, id_):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train_fasta",    required=True)
-    ap.add_argument("--val_fasta",      required=True)
-    ap.add_argument("--test_fasta",     required=True)
-    ap.add_argument("--blast",          required=True)
-    ap.add_argument("--max_per_split",  type=int, default=200)
-    ap.add_argument("--seed",           type=int, default=42)
-    ap.add_argument("--output",         default="similarity_heatmap_mqc.html")
+    ap.add_argument("--train_fasta", required=True)
+    ap.add_argument("--val_fasta", required=True)
+    ap.add_argument("--test_fasta", required=True)
+    ap.add_argument("--blast", required=True)
+    ap.add_argument("--max_per_split", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--output", default="similarity_heatmap_mqc.html")
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
     args = ap.parse_args()
 

@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import read_fasta
 
 _AA_VOCAB = "ACDEFGHIKLMNPQRSTVWY"
-_AA_IDX   = {aa: i for i, aa in enumerate(_AA_VOCAB)}
+_AA_IDX = {aa: i for i, aa in enumerate(_AA_VOCAB)}
 
 
 def embed_one_hot(seqs):
@@ -61,12 +61,8 @@ def embed_prot_t5(seqs):
     from transformers import T5EncoderModel, T5Tokenizer
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = T5Tokenizer.from_pretrained(
-        "Rostlab/prot_t5_xl_half_uniref50-enc", do_lower_case=False
-    )
-    model = T5EncoderModel.from_pretrained(
-        "Rostlab/prot_t5_xl_half_uniref50-enc"
-    ).to(device).eval()
+    tokenizer = T5Tokenizer.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc", do_lower_case=False)
+    model = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc").to(device).eval()
 
     embeddings = {}
     for i, (pid, seq) in enumerate(seqs.items()):

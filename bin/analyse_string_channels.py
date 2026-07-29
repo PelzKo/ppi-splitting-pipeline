@@ -93,18 +93,16 @@ def build_matrices(rows, embeddings, channels):
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Predict STRING evidence channel scores from pair embeddings."
+    ap = argparse.ArgumentParser(description="Predict STRING evidence channel scores from pair embeddings.")
+    ap.add_argument(
+        "--train", required=True, help="Training CSV with 'protein1', 'protein2', 'label' and STRING columns"
     )
-    ap.add_argument("--train",      required=True,
-                    help="Training CSV with 'protein1', 'protein2', 'label' and STRING columns")
-    ap.add_argument("--test",       required=True,
-                    help="Test CSV in the same format")
-    ap.add_argument("--embeddings", required=True,
-                    help="Pre-computed embeddings .npz (output of embed_sequences.py)")
-    ap.add_argument("--seed",       type=int, default=42)
-    ap.add_argument("--out",        default="string_channel_analysis.tsv",
-                    help="Output TSV path (default: string_channel_analysis.tsv)")
+    ap.add_argument("--test", required=True, help="Test CSV in the same format")
+    ap.add_argument("--embeddings", required=True, help="Pre-computed embeddings .npz (output of embed_sequences.py)")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--out", default="string_channel_analysis.tsv", help="Output TSV path (default: string_channel_analysis.tsv)"
+    )
     args = ap.parse_args()
 
     print("Loading embeddings ...", file=sys.stderr)
@@ -121,12 +119,13 @@ def main():
     print(f"  {len(test_rows)} positive pairs", file=sys.stderr)
 
     X_train, A_train = build_matrices(train_rows, embeddings, available)
-    X_test,  A_test  = build_matrices(test_rows,  embeddings, available)
-    print(f"  {X_train.shape[0]} train / {X_test.shape[0]} test pairs after embedding lookup",
-          file=sys.stderr)
+    X_test, A_test = build_matrices(test_rows, embeddings, available)
+    print(f"  {X_train.shape[0]} train / {X_test.shape[0]} test pairs after embedding lookup", file=sys.stderr)
 
-    header = (f"{'Channel':<30} {'Train ρ':>9} {'Test ρ':>9} "
-              f"{'p-value':>12} {'Score mean (tr)':>16} {'Score std (tr)':>15}")
+    header = (
+        f"{'Channel':<30} {'Train ρ':>9} {'Test ρ':>9} "
+        f"{'p-value':>12} {'Score mean (tr)':>16} {'Score std (tr)':>15}"
+    )
     print(f"\n{header}")
     print("-" * len(header))
 
@@ -142,17 +141,20 @@ def main():
         reg = Ridge(alpha=1.0, solver="sag", random_state=args.seed, max_iter=100)
         reg.fit(X_train, A_tr)
 
-        train_rho, _     = spearmanr(A_tr, reg.predict(X_train))
-        test_rho,  pval  = spearmanr(A_te, reg.predict(X_test))
+        train_rho, _ = spearmanr(A_tr, reg.predict(X_train))
+        test_rho, pval = spearmanr(A_te, reg.predict(X_test))
 
-        print(f"{channel:<30} {train_rho:>9.4f} {test_rho:>9.4f} "
-              f"{pval:>12.4e} {A_tr.mean():>16.4f} {A_tr.std():>15.4f}")
+        print(
+            f"{channel:<30} {train_rho:>9.4f} {test_rho:>9.4f} "
+            f"{pval:>12.4e} {A_tr.mean():>16.4f} {A_tr.std():>15.4f}"
+        )
         results.append((channel, train_rho, test_rho, pval, float(A_tr.mean()), float(A_tr.std())))
 
     with open(args.out, "w", newline="") as fh:
         writer = csv.writer(fh, delimiter="\t")
-        writer.writerow(["channel", "train_spearman_rho", "test_spearman_rho",
-                         "p_value", "score_mean_train", "score_std_train"])
+        writer.writerow(
+            ["channel", "train_spearman_rho", "test_spearman_rho", "p_value", "score_mean_train", "score_std_train"]
+        )
         writer.writerows(results)
     print(f"\nResults written to {args.out}", file=sys.stderr)
 

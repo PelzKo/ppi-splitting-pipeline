@@ -6,10 +6,10 @@ import sys
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # FASTA I/O
 # ---------------------------------------------------------------------------
+
 
 def read_fasta(path):
     """Return {protein_id: sequence} from a FASTA file."""
@@ -41,6 +41,7 @@ def write_fasta(seqs, proteins, path):
 # PPI CSV I/O
 # ---------------------------------------------------------------------------
 
+
 def read_ppis(path):
     """Return list of row dicts from a PPI CSV, stripping protein ID whitespace."""
     seen, rows = set(), []
@@ -66,10 +67,10 @@ def write_ppi_csv(rows, path):
         writer.writerows(rows)
 
 
-
 # ---------------------------------------------------------------------------
 # KaHIP partition I/O
 # ---------------------------------------------------------------------------
+
 
 def read_node_mapping(path):
     """Return {node_id (int, 1-indexed): protein_id}."""
@@ -106,6 +107,7 @@ def read_labelled_csv(path):
 # Embeddings
 # ---------------------------------------------------------------------------
 
+
 def load_embeddings(path):
     """Return {protein_id: embedding_array} from an NPZ file."""
     raw = np.load(path, allow_pickle=False)
@@ -116,14 +118,10 @@ def load_embeddings(path):
 # MultiQC sample naming
 # ---------------------------------------------------------------------------
 
-# MultiQC's rendered tables/bar charts sort rows alphabetically by Sample
-# name regardless of the underlying file/row order, so a plain f"{id}_{split}"
-# Sample would show up as test_balanced, test_realistic, train, val. This
-# numeric prefix forces the requested train/val/test/test_balanced/test_realistic
-# order while keeping each dataset's rows grouped together (the id_ prefix
-# still sorts first).
-SPLIT_SORT_KEY = {"train": 1, "val": 2, "test": 3, "test_balanced": 4,
-                  "test_realistic": 5, "discarded": 6}
+# MultiQC sorts rows alphabetically by Sample name, so a plain f"{id}_{split}"
+# would show test_balanced, test_realistic, train, val. This numeric prefix
+# forces train/val/test/test_balanced/test_realistic order per dataset.
+SPLIT_SORT_KEY = {"train": 1, "val": 2, "test": 3, "test_balanced": 4, "test_realistic": 5, "discarded": 6}
 
 
 def mqc_sample(id_, split):

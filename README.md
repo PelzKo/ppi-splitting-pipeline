@@ -101,7 +101,7 @@ One combined report for the whole run: open `results/multiqc/multiqc_report.html
 
 **SAMPLE_NEGATIVES_DEGREE** — Samples random negative pairs for each split. By default, negatives are drawn such that each protein's degree distribution is approximately preserved, producing a balanced test set (1:1 positive:negative) and a realistic test set (1:10 ratio). With `negative_sampling_method=uniform`, endpoints are instead drawn fully uniformly at random for *every* split (not just the realistic test set) — see [Naive baseline: the topology shortcut](#naive-baseline-the-topology-shortcut-optional) below.
 
-**SAMPLE_NEGATIVES_ILP** – An ILP-based alternative satisfying the size constraints and minimizing biases while maximizing confidence in the negatives;  see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below.
+**SAMPLE_NEGATIVES_ILP** – An ILP-based alternative satisfying the size constraints while minimizing biases between the positive and negative sets; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below.
 
 **EMBED_SEQUENCES** — Computes per-protein embeddings using the selected model:
 - `none` — 21-dimensional mean-pooled one-hot amino acid composition
@@ -206,11 +206,10 @@ string,data/string.csv,ilp,ilp,0.5,0.5
 | `split_method`, `edge_weight`, `kahip_k`, `ilp_kahip_k`, `ilp_epsilon`                                     | `params.*` of the same name | Defaults: `split_method`: kahip (k=3), `edge_weight`: normalized_bitscore, `kahip_k`: 3, `ilp_kahip_k`: 100, `ilp_epsilon`: 0.05. `split_method=random` is a naive baseline, see below                                                                  |
 | `train_split`, `val_split`, `test_split`                                                                   | `params.*` of the same name | Defaults: 0.8, 0.1, 0.1                                                                                                                                                                                                                                 |
 | `negative_sampling_method`                                                                                 | `params.*` of the same name | Defaults: default (alternatives: ilp, uniform — see below)                                                                                                                                                                                              |
-| `neg_ilp_alpha_confidence`, `neg_ilp_alpha_bias`                                                           | `params.*` of the same name | Only used when `negative_sampling_method` is `ilp`; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below. Highly dataset-specific, so overridable per row rather than fixed run-wide.                               |
-| `neg_ilp_lambda_degree`, `neg_ilp_lambda_taxon_pair`, `neg_ilp_lambda_self_loop`, `neg_ilp_lambda_jaccard` | `params.*` of the same name | Same as above.                                                                                                                                                                                                                                          |
+| `neg_ilp_lambda_degree`, `neg_ilp_lambda_taxon_pair`, `neg_ilp_lambda_self_loop`, `neg_ilp_lambda_jaccard` | `params.*` of the same name | Only used when `negative_sampling_method` is `ilp`; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below. Highly dataset-specific, so overridable per row rather than fixed run-wide.                               |
 
 Everything else (solver settings, Gurobi license, resource limits, seeds,
-`neg_ilp_degree_bias_mode`, ...) stays a run-wide default in
+...) stays a run-wide default in
 `nextflow.config` and is shared by every dataset in the samplesheet.
 
 **Deduplicated work across datasets.** Datasets often overlap in which
@@ -316,21 +315,19 @@ NMI/detectability that the leakage-aware splits' reports won't show at all.
 
 `SAMPLE_NEGATIVES_ILP` is an opt-in alternative to `SAMPLE_NEGATIVES` that chooses
 the negative set by solving a mixed-integer linear program (CVXPY), rather than
-sampling at random. It matches per-protein per-taxon interaction counts,
-self-interaction counts, and mean GO-BP Jaccard similarity between the positive
-and negative sets, while preferring high-confidence non-interactions when a
-confidence score is supplied. `bin/sample_negatives_ilp.py` samples exactly one
-split per invocation; the process runs once per split for train, val, and
-test_balanced, and Nextflow executes all three in parallel. `test_realistic`
+sampling at random. It matches per-protein degree, per-taxon-pair interaction
+counts, self-interaction counts, and mean GO-BP Jaccard similarity between the
+positive and negative sets. `bin/sample_negatives_ilp.py` samples exactly one
+split per invocation; the process runs once per split (train, val,
+test_balanced) and Nextflow executes all three in parallel. `test_realistic`
 is deliberately excluded — same as under `negative_sampling_method=default`,
 it always gets uniform-at-random negatives (via `SAMPLE_NEGATIVES_DEGREE`)
 regardless of `negative_sampling_method`, since the point of that split is to
 simulate an uncontrolled random screen, and bias-matching its negatives to
-the positives would defeat that purpose. Together they produce the same four
-output files (`train.csv`, `val.csv`, `test_balanced.csv`,
-`test_realistic.csv`) as the default sampler, so all downstream steps are
-unaffected. See `sample_negatives_SPEC.md` and `ppi_negative_sampling_ilp.tex`
-for the full mathematical derivation.
+the positives would defeat that purpose. Together they produce the same four 
+output files (`train.csv`, `val.csv`, `test_balanced.csv`, 
+`test_realistic.csv`) as the default sampler, so all downstream steps are 
+unaffected. 
 
 Enable it with:
 
@@ -338,7 +335,7 @@ Enable it with:
 nextflow run main.nf --negative_sampling_method ilp
 ```
 
-The `--neg_ilp_alpha_*` and `--neg_ilp_lambda_*` weights are highly
+The `--neg_ilp_lambda_*` weights are highly
 dataset-specific (they depend on each dataset's degree distribution, taxon
 composition, and GO annotation coverage), so when running multiple datasets
 via `--samplesheet` they are set **per row**, not as a single run-wide value —
@@ -350,21 +347,18 @@ leaves them blank.
 | Parameter                                           | Default       | Description                                                                                                                                                                  |
 |-----------------------------------------------------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `negative_sampling_method`                          | `default`     | `default` (random) or `ilp`                                                                                                                                                  |
-| `candidate_network`                               | `null`        | Optional CSV (`protein1,protein2[,w]`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Required for large protein universes (see below). |
-| `neg_ilp_alpha_confidence` / `--neg_ilp_alpha_bias` | `0.3` / `0.7` | Trade-off between confidence loss and bias matching (must sum to 1)                                                                                                          |
-| `neg_ilp_lambda_degree`                           | `0.6`         | Weight of the per-protein (per-taxon, in `unified` mode) degree-matching term                                                                                                |
-| `neg_ilp_lambda_taxon_pair`                       | `0.0`         | Weight of the global taxon-pair matching term (`split` mode only)                                                                                                            |
+| `candidate_network`                               | `null`        | Optional CSV (`protein1,protein2`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Required for large protein universes (see below). |
+| `neg_ilp_lambda_degree`                           | `0.6`         | Weight of the per-protein aggregate degree-matching term                                                                                                                     |
+| `neg_ilp_lambda_taxon_pair`                       | `0.0`         | Weight of the global taxon-pair matching term                                                                                                                                |
 | `neg_ilp_lambda_self_loop`                        | `0.1`         | Weight of the self-interaction count matching term                                                                                                                           |
 | `neg_ilp_lambda_jaccard`                          | `0.3`         | Weight of the mean GO-BP Jaccard matching term                                                                                                                               |
-| `neg_ilp_degree_bias_mode`                        | `unified`     | `unified` (single per-protein-per-taxon term) or `split` (separate per-protein degree and taxon-pair terms)                                                                  |
 | `neg_ilp_solver`                                  | `auto`        | `auto`, `gurobi`, `scip`, or `highs`. `auto` tries Gurobi first, then falls back to an open-source solver.                                                                   |
 | `neg_ilp_time_limit`                              | `3600`        | Solver time limit in seconds                                                                                                                                                 |
 | `neg_ilp_mip_gap`                                 | `0.01`        | Solver MIP gap tolerance                                                                                                                                                     |
 | `gurobi_license`                                  | `null`        | Path to a Gurobi license file, only used if the `gurobi` solver is selected                                                                                                  |
 
-The active `--neg_ilp_lambda_*` weights (for the chosen `degree_bias_mode`) must
-sum to 1; a mismatch is auto-rescaled with a warning unless the script is run
-with `--strict-weights` directly (not exposed as a pipeline parameter).
+The active `--neg_ilp_lambda_*` weights are recommended to sum to 1, but this
+is not enforced by the script.
 
 For Gurobi, install it yourself and point `--gurobi_license` at your license
 file (`pip install gurobipy` is already pulled in by `environment.yml`). With
@@ -373,8 +367,14 @@ by `environment.yml`.
 
 The default candidate pool is the full upper-triangle complement of the
 positive set, which is quadratic in the number of proteins (~1.1×10⁸ pairs for
-15k proteins). For large datasets, supply `--candidate_network` to restrict
-the pool, or the script will raise a clear error before attempting to build it.
+15k proteins). If it exceeds `max_candidates`, the pool is randomly subsampled
+instead of built in full — weighted toward each protein's own negative-degree
+cap rather than uniformly, so a low-degree protein doesn't end up with far
+more candidates than it can ever use. For large datasets, supply
+`--candidate_network` to restrict the pool to a deliberately-curated set
+instead (e.g. a Negatome database or a topology-driven pool); if that network
+is itself larger than `max_candidates`, it's capped down the same
+degree-weighted way rather than used in full.
 
 Each split's process writes its own `<split>_mqc.tsv` diagnostics row and,
 optionally, `<split>_residuals_mqc.tsv` (per-protein degree residuals); MultiQC

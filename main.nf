@@ -10,10 +10,8 @@ include { SAMPLE_NEGATIVES } from './subworkflows/sample_negatives'
 include { TRAIN_BASELINE }   from './subworkflows/train_baseline'
 include { QC }               from './subworkflows/qc'
 
-// samplesheetToList() represents a blank optional cell as [] (empty list),
-// not null, regardless of the field's declared type -- so a plain `!= null`
-// check isn't enough to detect "not given" for numeric fields where 0 is a
-// legitimate override value.
+// samplesheetToList() represents a blank cell as [] (not null), even for
+// numeric fields where 0 is a legitimate override -- so check both.
 def isGiven(v) {
     !(v == null || v == [])
 }
@@ -22,16 +20,15 @@ def isGiven(v) {
 // back to the corresponding default in nextflow.config, so a single run
 // can process several datasets in parallel, each with its own overrides.
 def buildDatasetsChannel() {
-    // samplesheetToList() returns each row as a plain positional list (not
-    // a map) unless schema properties are marked "meta" -- this must match
-    // assets/schema_input.json's `properties` order exactly.
+    // samplesheetToList() returns each row as a positional list, not a map
+    // -- order here must match assets/schema_input.json's `properties`.
     def fields = [
         "id", "ppis", "sequences", "go_annotations", "species", "blast_results", "candidate_network",
         "partition", "node_mapping",
         "embedding_model", "cdhit_identity", "cdhit_wordsize", "split_method", "edge_weight",
         "kahip_k", "ilp_kahip_k", "train_split", "val_split", "test_split", "ilp_epsilon", "ilp_max_sec",
         "negative_sampling_method",
-        "neg_ilp_alpha_confidence", "neg_ilp_time_limit", "neg_ilp_alpha_bias", "neg_ilp_lambda_degree",
+        "neg_ilp_time_limit", "neg_ilp_lambda_degree",
         "neg_ilp_lambda_taxon_pair", "neg_ilp_lambda_self_loop", "neg_ilp_lambda_jaccard",
     ]
     def rows = samplesheetToList(params.samplesheet, "${projectDir}/assets/schema_input.json")
@@ -65,8 +62,6 @@ def buildDatasetsChannel() {
             ilp_max_sec              : isGiven(row.ilp_max_sec)              ? row.ilp_max_sec              : params.ilp_max_sec,
             negative_sampling_method : params.split_only ? "ilp" : (isGiven(row.negative_sampling_method) ? row.negative_sampling_method : params.negative_sampling_method),
             neg_ilp_time_limit       : isGiven(row.neg_ilp_time_limit)       ? row.neg_ilp_time_limit       : params.neg_ilp_time_limit,
-            neg_ilp_alpha_confidence : isGiven(row.neg_ilp_alpha_confidence)  ? row.neg_ilp_alpha_confidence  : params.neg_ilp_alpha_confidence,
-            neg_ilp_alpha_bias       : isGiven(row.neg_ilp_alpha_bias)        ? row.neg_ilp_alpha_bias        : params.neg_ilp_alpha_bias,
             neg_ilp_lambda_degree    : isGiven(row.neg_ilp_lambda_degree)     ? row.neg_ilp_lambda_degree     : params.neg_ilp_lambda_degree,
             neg_ilp_lambda_taxon_pair: isGiven(row.neg_ilp_lambda_taxon_pair) ? row.neg_ilp_lambda_taxon_pair : params.neg_ilp_lambda_taxon_pair,
             neg_ilp_lambda_self_loop : isGiven(row.neg_ilp_lambda_self_loop)  ? row.neg_ilp_lambda_self_loop  : params.neg_ilp_lambda_self_loop,

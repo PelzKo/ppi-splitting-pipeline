@@ -70,8 +70,7 @@ def write_combined(pos_rows, negatives, path):
             "--positives already has a 'label' column -- refusing to relabel "
             "what looks like a previously-combined pos/neg file as all-positive"
         )
-    extra_fields = [k for k in (pos_rows[0].keys() if pos_rows else [])
-                    if k not in ("protein1", "protein2")]
+    extra_fields = [k for k in (pos_rows[0].keys() if pos_rows else []) if k not in ("protein1", "protein2")]
     fieldnames = ["protein1", "protein2", "label"] + extra_fields
     with open(path, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -91,9 +90,8 @@ def write_combined(pos_rows, negatives, path):
 
 
 def write_mqc(split_name, n_positives, n_negatives, gs_out, bar_out, id_):
-    # Sharing the same 'id' across all datasets' files lets MultiQC merge
-    # them into one combined general-stats table / bar plot; Sample is
-    # qualified by dataset so rows/categories don't collide across datasets.
+    # Same 'id' across datasets lets MultiQC merge them into one table/plot;
+    # Sample is dataset-qualified so rows don't collide across datasets.
     sample = mqc_sample(id_, split_name)
     with open(gs_out, "w") as fh:
         fh.write(
@@ -134,12 +132,13 @@ def write_mqc(split_name, n_positives, n_negatives, gs_out, bar_out, id_):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--positives",  required=True, help="Input CSV of positive PPIs for this split")
-    ap.add_argument("--output",     required=True, help="Output combined CSV path")
+    ap.add_argument("--positives", required=True, help="Input CSV of positive PPIs for this split")
+    ap.add_argument("--output", required=True, help="Output combined CSV path")
     ap.add_argument("--split-name", required=True, help="Split label, e.g. train/val/test_balanced/test_realistic")
-    ap.add_argument("--ratio",      type=float, default=1.0, help="negatives = ratio * positives")
-    ap.add_argument("--uniform", action="store_true",
-                     help="Draw negative endpoints uniformly at random instead of degree-weighted")
+    ap.add_argument("--ratio", type=float, default=1.0, help="negatives = ratio * positives")
+    ap.add_argument(
+        "--uniform", action="store_true", help="Draw negative endpoints uniformly at random instead of degree-weighted"
+    )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
     args = ap.parse_args()
@@ -150,7 +149,9 @@ def main():
     print(f"{args.split_name}: {len(rows)} positives → {len(negs)} negatives sampled", file=sys.stderr)
 
     write_mqc(
-        args.split_name, len(rows), len(negs),
+        args.split_name,
+        len(rows),
+        len(negs),
         gs_out=f"{args.split_name}_gs_mqc.tsv",
         bar_out=f"{args.split_name}_bar_mqc.tsv",
         id_=args.id,

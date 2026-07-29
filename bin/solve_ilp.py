@@ -29,21 +29,20 @@ def parse_kahip_partition(partition_path, node_mapping_path):
     """Return {protein_id: cluster_id} from a KaHIP partition + node mapping."""
     node_to_prot = read_node_mapping(node_mapping_path)
     partition_list = read_partition(partition_path)
-    return {
-        node_to_prot[nid]: partition_list[nid - 1]
-        for nid in node_to_prot
-        if nid - 1 < len(partition_list)
-    }
+    return {node_to_prot[nid]: partition_list[nid - 1] for nid in node_to_prot if nid - 1 < len(partition_list)}
 
 
 def build_matrices(clusters_list, protein_to_cluster, ppi_rows):
+    """
+    Counts the number of PPIs within each cluster and between clusters.
+
+    :param clusters_list: List of the cluster IDs returned by KaHIP
+    :param protein_to_cluster: Assignment of the protein IDs to the cluster IDs
+    :param ppi_rows: The PPI dataset
+    :return:
+    """
     n = len(clusters_list)
     cluster_to_idx = {c: i for i, c in enumerate(clusters_list)}
-
-    weights = np.zeros(n, dtype=np.float64)
-    for p, c in protein_to_cluster.items():
-        if c in cluster_to_idx:
-            weights[cluster_to_idx[c]] += 1
 
     intra_ppi = np.zeros(n, dtype=np.float64)
     cross_ppi = np.zeros((n, n), dtype=np.float64)  # upper triangle; cross_ppi[i,j] = count for i < j
@@ -61,7 +60,7 @@ def build_matrices(clusters_list, protein_to_cluster, ppi_rows):
         else:
             cross_ppi[min(i, j), max(i, j)] += 1
 
-    return weights, cross_ppi, intra_ppi
+    return cross_ppi, intra_ppi
 
 
 def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_sec, solver):
@@ -74,7 +73,7 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
 
         (2) Σ_{i=1}^n x[s,c_i] * k(c_i,c_i) + Σ_{i=1}^{n-1}Σ_{j=i+1}^{n} x[s,c_i] * x[s,c_j] * k(c_i,c_j)
         ≥ (1-ε) * f_s * Σ_{s=1}^S Σ_{i=1}^{n} Σ_{j=i}^{n} x[s,c_i] * x[s,c_j] * k(c_i,c_j)
-        ∀s  (minimum split size)
+        ∀s  (minimum split size) -> the product x[s, c_i] * x[s, c_j] is linearized with z
 
         with k(c_i,c_j) := number of PPIs between clusters c_i and c_j and f_s := fraction of PPIs in split s.
         intra_ppi[i] = k(c_i,c_i); cross_ppi[i,j] = k(c_i,c_j) for i < j (upper triangle, actual counts).
@@ -82,7 +81,7 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
     Objective (minimize): the data loss, i.e., PPIs between clusters assigned to different splits.
         min_X Σ_{i=1}^{n-1}Σ_{j=i+1}^{n} k(c_i,c_j) * (1 - Σ_{s=1}^S x[s,c_i] * x[s,c_j])
     """
-    n_splits   = len(splits)
+    n_splits = len(splits)
     n_clusters = len(clusters_list)
 
     # Matrix variable: x[s, c] = 1 iff cluster c is assigned to split s.
@@ -91,20 +90,9 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
     # Constraint 1: every cluster is in exactly one split.
     constraints = [cp.sum(x, axis=0) == np.ones(n_clusters)]
 
-    # Constraint 2: each split receives ≥ (1-ε)·f_s of all selected PPIs.
-    #
-    # PPIs in split s = intra-cluster PPIs of clusters in s
-    #                 + cross-cluster PPIs where BOTH clusters are in s
-    #
-    # The product x[s,i]·x[s,j] (both clusters in same split) is linearised:
-    #   introduce z[s,k] ∈ {0,1} for each pair k=(i,j) with k(c_i,c_j) > 0
-    #   z[s,k] ≤ x[s,i],  z[s,k] ≤ x[s,j],  z[s,k] ≥ x[s,i] + x[s,j] − 1
-    loss_pairs = [
-        (i, j)
-        for i in range(n_clusters)
-        for j in range(i + 1, n_clusters)
-        if cross_ppi[i, j] > 0
-    ]
+    # Constraint 2, linearizing x[s,i]·x[s,j] (both clusters in same split): for each pair
+    # k=(i,j) with k(c_i,c_j) > 0, z[s,k] ≤ x[s,i], z[s,k] ≤ x[s,j], z[s,k] ≥ x[s,i]+x[s,j]−1
+    loss_pairs = [(i, j) for i in range(n_clusters) for j in range(i + 1, n_clusters) if cross_ppi[i, j] > 0]
     cross_counts = np.array([cross_ppi[i, j] for i, j in loss_pairs])  # actual PPI counts
 
     if loss_pairs:
@@ -117,26 +105,28 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
                     z[s, k] >= x[s, i] + x[s, j] - 1,
                 ]
         # total_assigned: intra PPIs (always kept) + co-assigned cross-cluster PPIs
-        z_sum          = cp.sum(z, axis=0)  # z_sum[k] = 1 iff pair k ends up in the same split
+        z_sum = cp.sum(z, axis=0)  # z_sum[k] = 1 iff pair k ends up in the same split
         total_assigned = float(np.sum(intra_ppi)) + cross_counts @ z_sum
     else:
-        z              = None
+        z = None
         total_assigned = float(np.sum(intra_ppi))
 
+    # Constraint 3: each split receives ≥ (1-ε)·f_s of all selected PPIs.
+    # PPIs in split s = intra-cluster PPIs of clusters in s
+    #                 + cross-cluster PPIs where BOTH clusters are in s
+    #
     for s, frac in enumerate(splits):
         ppi_in_s = cp.sum(cp.multiply(intra_ppi, x[s]))
         if z is not None:
             ppi_in_s = ppi_in_s + cross_counts @ z[s]
         constraints.append((1.0 - epsilon) * frac * total_assigned <= ppi_in_s)
 
-    # Objective: minimise discarded cross-cluster PPIs.
-    # Since each cluster is in exactly one split (constraint 1),
-    # cp.max(x[s,i] − x[s,j]) over s = 1 iff i and j are in different splits, 0 otherwise,
-    # which equals (1 − Σ_s x[s,i]·x[s,j]) from the docstring.
+    # Objective: minimize discarded cross-cluster PPIs. Since each cluster is in exactly
+    # one split (constraint 1), cp.max(x[s,i] − x[s,j]) over s = 1 iff i,j differ in split
+    # (0 otherwise) -- equivalent to (1 − Σ_s x[s,i]·x[s,j]) from the docstring.
     if loss_pairs:
         dl_terms = [
-            cross_ppi[i, j] * cp.max(cp.vstack([x[s, i] - x[s, j] for s in range(n_splits)]))
-            for (i, j) in loss_pairs
+            cross_ppi[i, j] * cp.max(cp.vstack([x[s, i] - x[s, j] for s in range(n_splits)])) for (i, j) in loss_pairs
         ]
         objective = cp.Minimize(cp.sum(dl_terms))
     else:
@@ -156,8 +146,7 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
 
     if problem.status == cp.settings.USER_LIMIT:
         print(
-            "Solver hit the time limit before proving optimality; "
-            "using the best incumbent found (suboptimal).",
+            "Solver hit the time limit before proving optimality; " "using the best incumbent found (suboptimal).",
             file=sys.stderr,
         )
 
@@ -170,25 +159,23 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ppis",        required=True, help="PPI CSV (protein1,protein2)")
-    ap.add_argument("--fasta",       required=True, help="Protein FASTA")
-    ap.add_argument("--partition",    required=True, help="KaHIP partition file")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--ppis", required=True, help="PPI CSV (protein1,protein2)")
+    ap.add_argument("--fasta", required=True, help="Protein FASTA")
+    ap.add_argument("--partition", required=True, help="KaHIP partition file")
     ap.add_argument("--node_mapping", required=True, help="KaHIP node_mapping.tsv (node_id -> protein_id)")
     ap.add_argument("--train-split", type=float, default=0.8)
-    ap.add_argument("--val-split",   type=float, default=0.1)
-    ap.add_argument("--test-split",  type=float, default=0.1)
-    ap.add_argument("--epsilon",     type=float, default=0.05,
-                    help="Allowed fractional deviation from target split size (default 0.05)")
-    ap.add_argument("--max-sec",     type=int,   default=300,
-                    help="ILP solver time limit in seconds (default 300)")
-    ap.add_argument("--solver",      default=None,
-                    help="CVXPY solver name, e.g. SCIP, GLPK_MI (default: auto)")
+    ap.add_argument("--val-split", type=float, default=0.1)
+    ap.add_argument("--test-split", type=float, default=0.1)
+    ap.add_argument(
+        "--epsilon", type=float, default=0.05, help="Allowed fractional deviation from target split size (default 0.05)"
+    )
+    ap.add_argument("--max-sec", type=int, default=300, help="ILP solver time limit in seconds (default 300)")
+    ap.add_argument("--solver", default=None, help="CVXPY solver name, e.g. SCIP, GLPK_MI (default: auto)")
     args = ap.parse_args()
 
     splits = [args.train_split, args.val_split, args.test_split]
-    names  = ["train", "val", "test"]
+    names = ["train", "val", "test"]
     assert abs(sum(splits) - 1.0) < 1e-6, "Split fractions must sum to 1"
 
     print("Loading PPIs …", file=sys.stderr)
@@ -196,9 +183,7 @@ def main():
 
     print("Reading FASTA …", file=sys.stderr)
     seqs = read_fasta(args.fasta)
-    all_proteins = sorted(
-        {p for row in ppi_rows for p in (row["protein1"], row["protein2"])} & set(seqs)
-    )
+    all_proteins = sorted({p for row in ppi_rows for p in (row["protein1"], row["protein2"])} & set(seqs))
     print(f"  {len(all_proteins):,} proteins with sequences", file=sys.stderr)
 
     print("Parsing KaHIP partition …", file=sys.stderr)
@@ -211,30 +196,35 @@ def main():
     for v in protein_to_cluster.values():
         cluster_counts[v] += 1
     sizes = sorted(cluster_counts.values(), reverse=True)
-    print(f"  {n_clusters:,} clusters; largest has {sizes[0]:,} proteins, "
-          f"median {sizes[len(sizes)//2]:,}", file=sys.stderr)
+    print(
+        f"  {n_clusters:,} clusters; largest has {sizes[0]:,} proteins, " f"median {sizes[len(sizes)//2]:,}",
+        file=sys.stderr,
+    )
 
     print("Building problem matrices …", file=sys.stderr)
-    weights, cross_ppi, intra_ppi = build_matrices(clusters_list, protein_to_cluster, ppi_rows)
+    cross_ppi, intra_ppi = build_matrices(clusters_list, protein_to_cluster, ppi_rows)
     n_loss_pairs = int(np.sum(cross_ppi > 0))
-    total_cross  = int(np.sum(cross_ppi))
-    print(f"  {n_loss_pairs:,} cluster pairs with cross-cluster PPIs "
-          f"({total_cross:,} PPIs at risk)", file=sys.stderr)
+    total_cross = int(np.sum(cross_ppi))
+    print(
+        f"  {n_loss_pairs:,} cluster pairs with cross-cluster PPIs " f"({total_cross:,} PPIs at risk)", file=sys.stderr
+    )
 
     print("Solving ILP …", file=sys.stderr)
     assignment = solve_ilp(
-        clusters_list, intra_ppi, cross_ppi,
-        splits, names, args.epsilon, args.max_sec, args.solver,
+        clusters_list,
+        intra_ppi,
+        cross_ppi,
+        splits,
+        names,
+        args.epsilon,
+        args.max_sec,
+        args.solver,
     )
     if assignment is None:
         print("ILP did not find a feasible solution.", file=sys.stderr)
         sys.exit(1)
 
-    protein_to_split = {
-        p: assignment[c]
-        for p, c in protein_to_cluster.items()
-        if c in assignment
-    }
+    protein_to_split = {p: assignment[c] for p, c in protein_to_cluster.items() if c in assignment}
 
     split_rows = defaultdict(list)
     for row in ppi_rows:
@@ -245,7 +235,7 @@ def main():
 
     split_results = []
     for name in names:
-        rows     = split_rows[name]
+        rows = split_rows[name]
         proteins = {p for row in rows for p in (row["protein1"], row["protein2"])}
         write_ppi_csv(rows, f"{name}.csv")
         write_fasta(seqs, proteins, f"{name}.fasta")

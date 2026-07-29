@@ -36,8 +36,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import load_embeddings, read_labelled_csv
 
 
-
-
 def build_pair_X(pairs, embeddings):
     """Return (X, mask) where mask[i]=True when both proteins have embeddings."""
     rows, mask = [], []
@@ -190,7 +188,6 @@ def func_relatedness(pairs, go_anns, category):
     return np.array(sims, dtype=np.float32)
 
 
-
 def _entropy(counts):
     """Shannon entropy in nats; ignores zero-count bins."""
     c = counts[counts > 0].astype(float)
@@ -206,9 +203,7 @@ def analyse(A, X, y, name, seed=42, n_bins=10):
     (or using unique values directly when A is already discrete).
     """
     discrete_features = name == "self_interactions"
-    mi = float(
-        mutual_info_classif(A.reshape(-1, 1), y, discrete_features=discrete_features, random_state=seed)[0]
-    )
+    mi = float(mutual_info_classif(A.reshape(-1, 1), y, discrete_features=discrete_features, random_state=seed)[0])
 
     _, y_counts = np.unique(y, return_counts=True)
     h_y = _entropy(y_counts)
@@ -234,14 +229,14 @@ def analyse(A, X, y, name, seed=42, n_bins=10):
 
 
 ATTRIBUTES = {
-    "sequence_similarity":       lambda pairs, blast_sim, emb, go, sp, train_deg: seq_sim_within_pair(pairs, blast_sim),
-    "embedding_similarity":      lambda pairs, blast_sim, emb, go, sp, train_deg: emb_sim_within_pair(pairs, emb),
+    "sequence_similarity": lambda pairs, blast_sim, emb, go, sp, train_deg: seq_sim_within_pair(pairs, blast_sim),
+    "embedding_similarity": lambda pairs, blast_sim, emb, go, sp, train_deg: emb_sim_within_pair(pairs, emb),
     "functional_relatedness_BP": lambda pairs, blast_sim, emb, go, sp, train_deg: func_relatedness(pairs, go, "BP"),
     "functional_relatedness_MF": lambda pairs, blast_sim, emb, go, sp, train_deg: func_relatedness(pairs, go, "MF"),
     "functional_relatedness_CC": lambda pairs, blast_sim, emb, go, sp, train_deg: func_relatedness(pairs, go, "CC"),
-    "self_interactions":         lambda pairs, blast_sim, emb, go, sp, train_deg: self_interactions(pairs),
-    "same_species":              lambda pairs, blast_sim, emb, go, sp, train_deg: same_species_indicator(pairs, sp),
-    "topology_shortcut":         lambda pairs, blast_sim, emb, go, sp, train_deg: topology_shortcut(pairs, train_deg),
+    "self_interactions": lambda pairs, blast_sim, emb, go, sp, train_deg: self_interactions(pairs),
+    "same_species": lambda pairs, blast_sim, emb, go, sp, train_deg: same_species_indicator(pairs, sp),
+    "topology_shortcut": lambda pairs, blast_sim, emb, go, sp, train_deg: topology_shortcut(pairs, train_deg),
 }
 
 
@@ -267,19 +262,16 @@ def write_mqc(attribute, results):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--attribute",      required=True,
-                    choices=list(ATTRIBUTES),
-                    help="attribute to analyse")
-    ap.add_argument("--train",           required=True)
-    ap.add_argument("--val",             required=True)
-    ap.add_argument("--test_balanced",   required=True)
-    ap.add_argument("--test_realistic",  required=True)
-    ap.add_argument("--blast",           required=True)
-    ap.add_argument("--embeddings",      required=True)
-    ap.add_argument("--go_annotations",  required=True)
-    ap.add_argument("--species",         default=None,
-                    help="species.tsv from fetch_data; required for same_species attribute")
-    ap.add_argument("--seed",            type=int, default=42)
+    ap.add_argument("--attribute", required=True, choices=list(ATTRIBUTES), help="attribute to analyse")
+    ap.add_argument("--train", required=True)
+    ap.add_argument("--val", required=True)
+    ap.add_argument("--test_balanced", required=True)
+    ap.add_argument("--test_realistic", required=True)
+    ap.add_argument("--blast", required=True)
+    ap.add_argument("--embeddings", required=True)
+    ap.add_argument("--go_annotations", required=True)
+    ap.add_argument("--species", default=None, help="species.tsv from fetch_data; required for same_species attribute")
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     print(f"=== {args.attribute} ===", file=sys.stderr)
@@ -311,9 +303,9 @@ def main():
         train_degree_ratio = build_train_degree_ratio(train_pairs, train_y)
 
     split_paths = [
-        ("train",          args.train),
-        ("val",            args.val),
-        ("test_balanced",  args.test_balanced),
+        ("train", args.train),
+        ("val", args.val),
+        ("test_balanced", args.test_balanced),
         ("test_realistic", args.test_realistic),
     ]
 
