@@ -151,7 +151,8 @@ def write_metis(n, weights, graph_path):
 
 def run_kaffpa(graph_path, k, seed, preconfiguration, partition_path):
     cmd = [
-        "kaffpa", str(graph_path),
+        "kaffpa",
+        str(graph_path),
         f"--k={k}",
         f"--seed={seed}",
         f"--output_filename={str(partition_path)}",
@@ -165,18 +166,24 @@ def run_kaffpa(graph_path, k, seed, preconfiguration, partition_path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ppis",              required=True, help="PPI CSV (protein1,protein2)")
-    ap.add_argument("--blast",             required=True, help="BLAST all-vs-all TSV (qseqid sseqid evalue bitscore …)")
-    ap.add_argument("--sizes",             nargs="+", type=int,
-                    default=[6_000, 7_000, 8_000, 9_000, 10_000],
-                    help="PPI subsample sizes to benchmark")
-    ap.add_argument("--k",                 type=int, default=10,
-                    help="Number of partitions for kaffpa (default: 10)")
-    ap.add_argument("--seed",              type=int, default=42)
-    ap.add_argument("--preconfiguration",  default="strong",
-                    choices=["fast", "eco", "strong", "ultrasetting"],
-                    help="kaffpa preconfiguration (default: strong)")
-    ap.add_argument("--outdir",            default="scalability_results")
+    ap.add_argument("--ppis", required=True, help="PPI CSV (protein1,protein2)")
+    ap.add_argument("--blast", required=True, help="BLAST all-vs-all TSV (qseqid sseqid evalue bitscore …)")
+    ap.add_argument(
+        "--sizes",
+        nargs="+",
+        type=int,
+        default=[6_000, 7_000, 8_000, 9_000, 10_000],
+        help="PPI subsample sizes to benchmark",
+    )
+    ap.add_argument("--k", type=int, default=10, help="Number of partitions for kaffpa (default: 10)")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--preconfiguration",
+        default="strong",
+        choices=["fast", "eco", "strong", "ultrasetting"],
+        help="kaffpa preconfiguration (default: strong)",
+    )
+    ap.add_argument("--outdir", default="scalability_results")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -209,7 +216,7 @@ def main():
         try:
             t0 = time.perf_counter()
             n_nodes, weights = build_line_graph(sample, blast_sim, global_max_bitscore)
-            graph_path     = outdir / f"line_graph_{size}.metis"
+            graph_path = outdir / f"line_graph_{size}.metis"
             partition_path = outdir / f"partition_{size}.txt"
             write_metis(n_nodes, weights, graph_path)
             t_build = time.perf_counter() - t0
@@ -219,22 +226,22 @@ def main():
             t_kaffpa = time.perf_counter() - t1
 
             t_total = t_build + t_kaffpa
-            records.append(dict(size=size, n_nodes=size, n_edges=n_edges,
-                                build_s=t_build, kaffpa_s=t_kaffpa, total_s=t_total))
+            records.append(
+                dict(size=size, n_nodes=size, n_edges=n_edges, build_s=t_build, kaffpa_s=t_kaffpa, total_s=t_total)
+            )
 
-            row = [str(size), str(size), str(n_edges),
-                   f"{t_build:.2f}", f"{t_kaffpa:.2f}", f"{t_total:.2f}"]
+            row = [str(size), str(size), str(n_edges), f"{t_build:.2f}", f"{t_kaffpa:.2f}", f"{t_total:.2f}"]
             print("  ".join(v.rjust(w) for v, w in zip(row, col_w)))
 
         except MemoryError:
             print(f"  [OOM] size {size:,}: n*(n-1)/2 = {n_edges:,} edges exceeded available memory")
-            records.append(dict(size=size, n_nodes=size, n_edges=n_edges,
-                                build_s="OOM", kaffpa_s="OOM", total_s="OOM"))
+            records.append(dict(size=size, n_nodes=size, n_edges=n_edges, build_s="OOM", kaffpa_s="OOM", total_s="OOM"))
 
     csv_path = outdir / "scalability_results.csv"
     with open(csv_path, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=["size", "n_nodes", "n_edges", "build_s", "kaffpa_s", "total_s"],
-                                extrasaction="ignore")
+        writer = csv.DictWriter(
+            fh, fieldnames=["size", "n_nodes", "n_edges", "build_s", "kaffpa_s", "total_s"], extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(records)
     print(f"\nResults written to {csv_path}")
