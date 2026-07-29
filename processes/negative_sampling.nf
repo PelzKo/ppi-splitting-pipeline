@@ -59,8 +59,6 @@ process SAMPLE_NEGATIVES_ILP {
         --go-annotations     ${go_annotations} \\
         ${cand_arg} \\
         ${lic_arg} \\
-        --alpha-confidence   ${meta.neg_ilp_alpha_confidence} \\
-        --alpha-bias         ${meta.neg_ilp_alpha_bias} \\
         --lambda-degree      ${meta.neg_ilp_lambda_degree} \\
         --lambda-taxon-pair  ${meta.neg_ilp_lambda_taxon_pair} \\
         --lambda-self-loop   ${meta.neg_ilp_lambda_self_loop} \\

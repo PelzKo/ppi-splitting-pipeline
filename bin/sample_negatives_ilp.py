@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ILP-based bias-aware negative sampling for PPI splits.
 
-Alternative to sample_negatives.py: solves a MILP that matches per-protein per-taxon degree, self-interaction count,
-and mean GO-BP Jaccard similarity between positive and negative sets, weighted toward high-confidence non-interactions.
+Alternative to sample_negatives.py: solves a MILP that matches per-protein degree, per-taxon-pair interaction
+counts, self-interaction count, and mean GO-BP Jaccard similarity between positive and negative sets.
 """
 
 from __future__ import annotations
@@ -36,8 +36,6 @@ MAX_DEGREE_SLACK = 5
 
 @dataclass
 class SamplingConfig:
-    alpha_confidence: float = 0.3
-    alpha_bias: float = 0.7
     lambda_degree: float = 0.6
     lambda_taxon_pair: float = 0.0
     lambda_self_loop: float = 0.1
@@ -74,13 +72,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     # shared inputs
     ap.add_argument("--species", default=None)
     ap.add_argument("--go-annotations", default=None)
-    ap.add_argument("--confidence", default=None)
     ap.add_argument("--candidate-network", default=None)
     ap.add_argument("--gurobi-license", default=None)
 
     # weights
-    ap.add_argument("--alpha-confidence", type=float, default=1.0)
-    ap.add_argument("--alpha-bias", type=float, default=0.0)
     ap.add_argument("--lambda-degree", type=float, default=0.0)
     ap.add_argument("--lambda-taxon-pair", type=float, default=0.0)
     ap.add_argument("--lambda-self-loop", type=float, default=0.0)
@@ -112,8 +107,6 @@ def _validate_config(cfg: SamplingConfig) -> None:
         ("lambda-taxon-pair", cfg.lambda_taxon_pair),
         ("lambda-self-loop", cfg.lambda_self_loop),
         ("lambda-jaccard", cfg.lambda_jaccard),
-        ("alpha-confidence", cfg.alpha_confidence),
-        ("alpha-bias", cfg.alpha_bias),
     ]:
         if val < 0:
             raise ValueError(f"--{flag} must be >= 0 (got {val})")
@@ -122,8 +115,6 @@ def _validate_config(cfg: SamplingConfig) -> None:
 def config_from_args(args: argparse.Namespace) -> SamplingConfig:
     """Build a SamplingConfig from CLI args (argparse already carries the defaults)."""
     cfg = SamplingConfig(
-        alpha_confidence=args.alpha_confidence,
-        alpha_bias=args.alpha_bias,
         lambda_degree=args.lambda_degree,
         lambda_taxon_pair=args.lambda_taxon_pair,
         lambda_self_loop=args.lambda_self_loop,
@@ -190,31 +181,15 @@ def load_go_bp(path, protein_to_idx) -> list:
     return result
 
 
-def load_confidence(path, protein_to_idx) -> dict:
-    """Return {(i,j): w} for pairs in the confidence CSV that fall within the protein universe.
-    Pairs not present here default to w=1 elsewhere."""
-    conf = {}
-    with open(path) as fh:
-        for row in csv.DictReader(fh):
-            p1, p2 = row["protein1"].strip(), row["protein2"].strip()
-            if p1 not in protein_to_idx or p2 not in protein_to_idx:
-                continue
-            i, j = protein_to_idx[p1], protein_to_idx[p2]
-            conf[(min(i, j), max(i, j))] = float(row["w"])
-    return conf
-
-
 def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingConfig):
-    """Read a pre-supplied candidate network CSV (protein1,protein2[,w]).
+    """Read a pre-supplied candidate network CSV (protein1,protein2).
 
-    Returns (candidates, confidence_override) restricted to the protein universe, excluding positives.
-    Oversized files are subsampled via _subsample_candidate_pairs (same degree-weighted logic, and forced-in
-    self-pairs, as the auto-generated pool)."""
+    Returns candidates restricted to the protein universe, excluding positives. Oversized files are subsampled
+    via _subsample_candidate_pairs (same degree-weighted logic, and forced-in self-pairs, as the auto-generated
+    pool)."""
     pairs = set()
-    weights = {}
     with open(path) as fh:
         reader = csv.DictReader(fh)
-        has_w = reader.fieldnames is not None and "w" in reader.fieldnames
         for row in reader:
             p1, p2 = row["protein1"].strip(), row["protein2"].strip()
             if p1 not in protein_to_idx or p2 not in protein_to_idx:
@@ -224,8 +199,6 @@ def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingCon
             if (i, j) in pos_pairs_set:
                 continue
             pairs.add((i, j))
-            if has_w and row.get("w"):
-                weights[(i, j)] = float(row["w"])
 
     network_pairs = np.array(sorted(pairs), dtype=np.int64) if pairs else np.zeros((0, 2), dtype=np.int64)
 
@@ -243,7 +216,7 @@ def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingCon
     pos_pairs_arr = (
         np.array(sorted(pos_pairs_set), dtype=np.int64) if pos_pairs_set else np.zeros((0, 2), dtype=np.int64)
     )
-    candidates = _subsample_candidate_pairs(
+    return _subsample_candidate_pairs(
         n_proteins,
         pos_pairs_arr,
         cfg.max_candidates,
@@ -251,12 +224,6 @@ def load_candidate_network(path, protein_to_idx, pos_pairs_set, cfg: SamplingCon
         seed=cfg.seed,
         given_pairs=network_pairs,
     )
-
-    if weights:
-        kept = {tuple(row) for row in candidates.tolist()}
-        weights = {k: v for k, v in weights.items() if k in kept}
-
-    return candidates, (weights or None)
 
 
 # ============================================================
@@ -690,7 +657,6 @@ def print_objective_breakdown(name, diag: dict) -> None:
     target) is silently dominating and crowding out the others, even when their lambdas are set equal."""
     obj = diag["obj_value"]
     terms = [
-        ("confidence", diag["confidence_term"]),
         ("degree", diag["bias_deg_term"]),
         ("taxon_pair", diag["bias_tax_term"]),
         ("self_loop", diag["bias_self_term"]),
@@ -765,14 +731,11 @@ class BuildContext:
     idx_to_protein: list
     species_path: object = None
     go_annotations_path: object = None
-    confidence_path: object = None
-    confidence_override: dict | None = None
 
     taxonomy: np.ndarray | None = field(default=None, init=False, repr=False)
     taxonomy_codes: np.ndarray | None = field(default=None, init=False, repr=False)
     n_taxa: int | None = field(default=None, init=False, repr=False)
     go_bp: list | None = field(default=None, init=False, repr=False)
-    confidence_arr: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def ensure_taxonomy(self):
         if self.taxonomy_codes is None:
@@ -791,35 +754,6 @@ class BuildContext:
             self.go_bp = load_go_bp(self.go_annotations_path, self.protein_to_idx)
         return self.go_bp
 
-    def ensure_confidence(self):
-        if self.confidence_arr is None:
-            conf_map = self.confidence_override
-            if conf_map is None and self.confidence_path is not None:
-                conf_map = load_confidence(self.confidence_path, self.protein_to_idx)
-            arr = np.ones(len(self.candidates), dtype=np.float64)
-            if conf_map:
-                n = self.n_proteins
-                keys = self.candidates[:, 0].astype(np.int64) * n + self.candidates[:, 1].astype(np.int64)
-                items = list(conf_map.items())
-                q_keys = np.array([i * n + j for (i, j), _ in items], dtype=np.int64)
-                q_vals = np.array([w for _, w in items], dtype=np.float64)
-                pos = np.searchsorted(keys, q_keys)
-                pos = np.clip(pos, 0, len(keys) - 1)
-                found = keys[pos] == q_keys
-                arr[pos[found]] = q_vals[found]
-
-                # Unscored self-pairs default to the min observed confidence, not
-                # the pool default of 1.0 -- silence shouldn't imply high-confidence
-                # evidence of a real non-interaction.
-                is_self = self.candidates[:, 0] == self.candidates[:, 1]
-                scored = np.zeros(len(arr), dtype=bool)
-                scored[pos[found]] = True
-                unscored_self = is_self & ~scored
-                if np.any(unscored_self):
-                    arr[unscored_self] = q_vals.min()
-            self.confidence_arr = arr
-        return self.confidence_arr
-
 
 def build_context(
     pos_pairs,
@@ -829,8 +763,6 @@ def build_context(
     neg_ratio,
     species_path=None,
     go_annotations_path=None,
-    confidence_path=None,
-    confidence_override=None,
     taxonomy_codes=None,
     n_taxa=None,
     go_bp=None,
@@ -853,8 +785,6 @@ def build_context(
         idx_to_protein=idx_to_protein,
         species_path=species_path,
         go_annotations_path=go_annotations_path,
-        confidence_path=confidence_path,
-        confidence_override=confidence_override,
     )
     if taxonomy_codes is not None:
         ctx.taxonomy_codes = taxonomy_codes
@@ -878,32 +808,11 @@ class BiasTerm:
         raise NotImplementedError
 
     def build(self, x: cp.Variable, ctx: BuildContext):
-        """Return (aux_vars, constraints, objective_expr) already scaled by lambda_weight / U. The caller multiplies
-        by alpha_bias when summing."""
+        """Return (aux_vars, constraints, objective_expr) already scaled by lambda_weight / U."""
         raise NotImplementedError
 
     def debug_rows(self, x_value, ctx: BuildContext) -> list:
         return []
-
-
-class ConfidenceLoss(BiasTerm):
-    """Always active. term = (1/|NEG|) * sum (1-w_ij) x_ij, in [0,1]."""
-
-    name = "confidence"
-
-    def __init__(self):
-        super().__init__(lambda_weight=1.0)
-        self._active = True
-
-    def is_active(self) -> bool:
-        return True
-
-    def precompute(self, ctx: BuildContext) -> None:
-        ctx.ensure_confidence()
-
-    def build(self, x, ctx):
-        coef = (1.0 - ctx.confidence_arr) / ctx.n_neg
-        return [], [], coef @ x
 
 
 class SelfLoopBias(BiasTerm):
@@ -955,10 +864,10 @@ class JaccardMeanBias(BiasTerm):
         return [z], constraints, obj
 
 
-class SplitAggregateDegreeBias(BiasTerm):
-    """Variant B1: per-protein aggregate degree (no taxon)."""
+class DegreeBias(BiasTerm):
+    """Per-protein aggregate degree (no taxon)."""
 
-    name = "deg_split"
+    name = "degree"
 
     def precompute(self, ctx: BuildContext) -> None:
         n = ctx.n_proteins
@@ -976,10 +885,7 @@ class SplitAggregateDegreeBias(BiasTerm):
             return
 
         coef = np.zeros(n, dtype=np.float64)
-        pos_mask = active_mask & (dplus > 0)
-        zero_mask = active_mask & (dplus == 0)
-        coef[pos_mask] = 1.0 / np.log1p(dplus[pos_mask])
-        coef[zero_mask] = 1.0 / math.log(2.0)
+        coef[active_mask] = 1.0 / np.log1p(dplus[active_mask])
 
         active_idx = np.flatnonzero(active_mask)
         target = ctx.r * dplus[active_idx]
@@ -1021,7 +927,7 @@ class SplitAggregateDegreeBias(BiasTerm):
 
 
 class TaxonPairBias(BiasTerm):
-    """Variant B2: global taxon-pair counts."""
+    """Global taxon-pair counts."""
 
     name = "taxon_pair"
 
@@ -1086,19 +992,18 @@ class TaxonPairBias(BiasTerm):
 
 
 def assemble_active_biases(cfg: SamplingConfig):
-    """Return (confidence_term, [bias terms with lambda > 0]). Whether each ends up active (nonzero U,
-    data available) is decided later by precompute()/is_active()."""
-    confidence = ConfidenceLoss()
+    """Return [bias terms with lambda > 0]. Whether each ends up active (nonzero U, data available) is decided
+    later by precompute()/is_active()."""
     biases = []
     if cfg.lambda_degree > 0:
-        biases.append(SplitAggregateDegreeBias(cfg.lambda_degree))
+        biases.append(DegreeBias(cfg.lambda_degree))
     if cfg.lambda_taxon_pair > 0:
         biases.append(TaxonPairBias(cfg.lambda_taxon_pair))
     if cfg.lambda_self_loop > 0:
         biases.append(SelfLoopBias(cfg.lambda_self_loop))
     if cfg.lambda_jaccard > 0:
         biases.append(JaccardMeanBias(cfg.lambda_jaccard))
-    return confidence, biases
+    return biases
 
 
 _TERM_KEY = {
@@ -1116,25 +1021,21 @@ def _max_degree_cap(ctx: BuildContext) -> np.ndarray:
     return ctx.r * (1.0 + MAX_DEGREE_SLACK) * dplus
 
 
-def build_problem(ctx: BuildContext, confidence: ConfidenceLoss, active_biases, cfg: SamplingConfig):
+def build_problem(ctx: BuildContext, active_biases):
     x = cp.Variable(len(ctx.candidates), boolean=True)
     constraints = [cp.sum(x) == ctx.n_neg, ctx.incidence @ x <= _max_degree_cap(ctx)]
 
-    _, conf_constraints, conf_raw = confidence.build(x, ctx)
-    constraints += conf_constraints
-    objective_terms = [cfg.alpha_confidence * conf_raw]
-
+    objective_terms = []
     term_exprs = []  # list of (bias, scaled_expr)
     for b in active_biases:
         _, cons, raw_expr = b.build(x, ctx)
         constraints += cons
-        scaled = cfg.alpha_bias * raw_expr
-        term_exprs.append((b, scaled))
-        objective_terms.append(scaled)
+        term_exprs.append((b, raw_expr))
+        objective_terms.append(raw_expr)
 
     objective = cp.Minimize(sum(objective_terms))
     problem = cp.Problem(objective, constraints)
-    return problem, x, conf_raw, term_exprs
+    return problem, x, term_exprs
 
 
 # ============================================================
@@ -1253,7 +1154,6 @@ DIAG_COLUMNS = [
     "r",
     "n_candidates",
     "obj_value",
-    "confidence_term",
     "bias_deg_term",
     "bias_tax_term",
     "bias_self_term",
@@ -1352,7 +1252,6 @@ def sample_negatives_ilp(
     neg_ratio,
     species_path=None,
     go_annotations_path=None,
-    confidence_path=None,
     candidate_network_path=None,
     gurobi_license_path=None,
     protein_to_idx=None,
@@ -1378,11 +1277,8 @@ def sample_negatives_ilp(
         go_bp = load_go_bp(go_annotations_path, protein_to_idx)
         go_membership, go_sizes = _build_go_membership(go_bp)
 
-    confidence_override = None
     if candidate_network_path is not None:
-        candidates, confidence_override = load_candidate_network(
-            candidate_network_path, protein_to_idx, pos_pairs_set, cfg
-        )
+        candidates = load_candidate_network(candidate_network_path, protein_to_idx, pos_pairs_set, cfg)
     else:
         candidates = build_candidate_set(
             len(protein_to_idx),
@@ -1416,8 +1312,6 @@ def sample_negatives_ilp(
         neg_ratio,
         species_path=species_path,
         go_annotations_path=go_annotations_path,
-        confidence_path=confidence_path,
-        confidence_override=confidence_override,
         taxonomy_codes=taxonomy_codes,
         n_taxa=n_taxa,
         go_bp=go_bp,
@@ -1453,7 +1347,6 @@ def sample_negatives_ilp(
         diag = {
             **base_diag,
             "obj_value": 0.0,
-            "confidence_term": 0.0,
             "bias_deg_term": 0.0,
             "bias_tax_term": 0.0,
             "bias_self_term": 0.0,
@@ -1467,13 +1360,12 @@ def sample_negatives_ilp(
         print_dataset_stats(name, ctx.pos_pairs, ctx.candidates, ctx, cfg)
         return diag, ctx
 
-    confidence, biases = assemble_active_biases(cfg)
-    confidence.precompute(ctx)
+    biases = assemble_active_biases(cfg)
     for b in biases:
         b.precompute(ctx)
     active = [b for b in biases if b.is_active()]
 
-    problem, x, conf_raw, term_exprs = build_problem(ctx, confidence, active, cfg)
+    problem, x, term_exprs = build_problem(ctx, active)
     solver, options = select_solver(cfg, gurobi_license_path, cfg.verbose)
     try:
         result = solve(problem, solver, options, verbose=cfg.verbose)
@@ -1493,14 +1385,12 @@ def sample_negatives_ilp(
         "bias_self_term": 0.0,
         "bias_jac_term": 0.0,
     }
-    for b, scaled_expr in term_exprs:
-        term_values[_TERM_KEY[b.name]] += float(scaled_expr.value)
-    confidence_term = float(conf_raw.value) * cfg.alpha_confidence
+    for b, raw_expr in term_exprs:
+        term_values[_TERM_KEY[b.name]] += float(raw_expr.value)
 
     diag = {
         **base_diag,
         "obj_value": result["obj_value"],
-        "confidence_term": confidence_term,
         **term_values,
         "solver": str(solver),
         "wall_time_s": result["wall_time_s"],
@@ -1540,7 +1430,6 @@ if __name__ == "__main__":
         args.neg_ratio,
         species_path=args.species,
         go_annotations_path=args.go_annotations,
-        confidence_path=args.confidence,
         candidate_network_path=args.candidate_network,
         gurobi_license_path=args.gurobi_license,
         protein_to_idx=protein_to_idx,
