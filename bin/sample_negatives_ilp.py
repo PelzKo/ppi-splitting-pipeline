@@ -1009,7 +1009,7 @@ def assemble_active_biases(cfg: SamplingConfig):
 _TERM_KEY = {
     "self": "bias_self_term",
     "jaccard": "bias_jac_term",
-    "deg_split": "bias_deg_term",
+    "degree": "bias_deg_term",
     "taxon_pair": "bias_tax_term",
 }
 
