@@ -9,16 +9,9 @@ Have a look at the [Wiki](https://github.com/bionetslab/ppi-splitting-pipeline/w
 
 ## Quick Start
 
-### 1. Install dependencies
+### Input PPI File
 
-```bash
-conda env create -f environment.yml
-conda activate ppi-splitting-pipeline
-```
-
-### 2. Prepare your input
-
-Each PPI dataset is a CSV file with at least two columns (`protein1`, `protein2`) containing UniProt accession IDs. Additional columns (e.g. STRING evidence scores) are preserved throughout the pipeline.
+To custom-split your PPI dataset, you need to provide it to the pipeline as a CSV file with at least two columns (`protein1`, `protein2`) containing UniProt accession IDs. Additional columns (e.g., STRING evidence scores) are preserved throughout the pipeline.
 
 ```
 protein1,protein2
@@ -28,48 +21,43 @@ O14836-2,P12345
 ...
 ```
 
-Then list your dataset(s) in a samplesheet CSV, one row per dataset — see [Multiple datasets (samplesheet)](#multiple-datasets-samplesheet) below for the full column reference.
+### Samplesheet preparation
+
+You provide all parameters for the pipeline via a samplesheet CSV where one row corresponds to one run. E.g., :
+
+| id        | ppis             | split_method | negative_sampling_method | neg_ilp_solver | gurobi_license     |
+|-----------|------------------|--------------|--------------------------|----------------|--------------------|
+| fast-run  | data/my_ppis.csv | kahip        | default                  |                |                    |
+| split-ilp | data/my_ppis.csv | ilp          | default                  |                |                    |
+| all-ilp   | data/my_ppis.csv | ilp          | ilp                      | gurobi         | path/to/gurobi.lic |
+
+### Run the pipeline
+
+If you have a GPU, `-profile gpu` will submit the embedding step to a GPU, as specified by your nextflow config.
 
 ```
-id,ppis
-my_dataset,ppis.csv
-```
-
-### 3. Run the pipeline
-
-```bash
-nextflow run main.nf --samplesheet samplesheet.csv --outdir results
-```
-
-If you have a GPU, additionally specify `-profile gpu`, which will submit only the embedding steps to the GPU:
-
-```bash
 nextflow run main.nf --samplesheet samplesheet.csv --outdir results -profile gpu -c my_config.config
 ```
 
-Config example for an HPC with slurm and a dedicated GPU queue: https://nf-co.re/configs/daisybio/. Important part:
+In `my_config.config`, you have to specify where the GPU is located. SLURM example:
 
-```bash
- profiles {
-     ...
-     gpu {
-            docker.runOptions       = '-u $(id -u):$(id -g) --gpus all'
-            apptainer.runOptions    = '--nv'
-            singularity.runOptions  = '--nv'
-        process{
-                withLabel:process_gpu {
-                    queue = 'shared-gpu'
-                    clusterOptions = '--qos=limitgpus --gpus=a40:1 --exclude compms-gpu-1.exbio.wzw.tum.de'
-                }
+```
+profiles {
+    ...
+    gpu {
+        process {
+            withLabel:process_gpu {
+                queue = 'shared-gpu'
+                clusterOptions = '--qos=limitgpus --gpus=a40:1 --exclude small-gpu'
             }
         }
-        }
-} 
+    }
+}
 ```
 
-### 4. View the report
+### View the report
 
-One combined report for the whole run: open `results/multiqc/multiqc_report.html` in a browser. Content that's comparable across datasets (General Statistics, Classifier Performance, Positive vs Negative Pairs) is merged into one table/chart with an `ID` column identifying the dataset; content that's inherently per-dataset (PPI Partitioning, the similarity heatmap, the bias-analysis scatter plot) appears as its own separate, dataset-labelled panel.
+The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which you can view in a browser.
 
 ---
 
