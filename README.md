@@ -1,10 +1,11 @@
 ![Logo](logo.png)
 
-![Pipeline overview](metro_map.svg)
-
 Automated leakage-aware splitting of a protein–protein interaction (PPI) dataset into train, validation, and test sets, with redundancy removal, negative sampling, embedding-based classification, and bias analysis.
 
 Have a look at the [Wiki](https://github.com/bionetslab/ppi-splitting-pipeline/wiki) for more information.
+
+
+![Pipeline overview](metro_map.svg)
 
 ## Quick Start
 
