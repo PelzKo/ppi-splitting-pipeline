@@ -1,20 +1,17 @@
-# PPI Splitting Pipeline
-![Pipeline overview](metro_map.svg)
+![Logo](logo.png)
 
 Automated leakage-aware splitting of a protein–protein interaction (PPI) dataset into train, validation, and test sets, with redundancy removal, negative sampling, embedding-based classification, and bias analysis.
 
+Have a look at the [Wiki](https://github.com/bionetslab/ppi-splitting-pipeline/wiki) for more information.
+
+
+![Pipeline overview](metro_map.svg)
+
 ## Quick Start
 
-### 1. Install dependencies
+### Input PPI File
 
-```bash
-conda env create -f environment.yml
-conda activate ppi-splitting-pipeline
-```
-
-### 2. Prepare your input
-
-Each PPI dataset is a CSV file with at least two columns (`protein1`, `protein2`) containing UniProt accession IDs. Additional columns (e.g. STRING evidence scores) are preserved throughout the pipeline.
+To custom-split your PPI dataset, you need to provide it to the pipeline as a CSV file with at least two columns (`protein1`, `protein2`) containing UniProt accession IDs. Additional columns (e.g., STRING evidence scores) are preserved throughout the pipeline.
 
 ```
 protein1,protein2
@@ -24,48 +21,43 @@ O14836-2,P12345
 ...
 ```
 
-Then list your dataset(s) in a samplesheet CSV, one row per dataset — see [Multiple datasets (samplesheet)](#multiple-datasets-samplesheet) below for the full column reference.
+### Samplesheet preparation
+
+You provide all parameters for the pipeline via a samplesheet CSV where one row corresponds to one run. E.g., :
+
+| id        | ppis             | split_method | negative_sampling_method | neg_ilp_solver | gurobi_license     |
+|-----------|------------------|--------------|--------------------------|----------------|--------------------|
+| fast-run  | data/my_ppis.csv | kahip        | default                  |                |                    |
+| split-ilp | data/my_ppis.csv | ilp          | default                  |                |                    |
+| all-ilp   | data/my_ppis.csv | ilp          | ilp                      | gurobi         | path/to/gurobi.lic |
+
+### Run the pipeline
+
+If you have a GPU, `-profile gpu` will submit the embedding step to a GPU, as specified by your nextflow config.
 
 ```
-id,ppis
-my_dataset,ppis.csv
-```
-
-### 3. Run the pipeline
-
-```bash
-nextflow run main.nf --samplesheet samplesheet.csv --outdir results
-```
-
-If you have a GPU, additionally specify `-profile gpu`, which will submit only the embedding steps to the GPU:
-
-```bash
 nextflow run main.nf --samplesheet samplesheet.csv --outdir results -profile gpu -c my_config.config
 ```
 
-Config example for an HPC with slurm and a dedicated GPU queue: https://nf-co.re/configs/daisybio/. Important part:
+In `my_config.config`, you have to specify where the GPU is located. SLURM example:
 
-```bash
- profiles {
-     ...
-     gpu {
-            docker.runOptions       = '-u $(id -u):$(id -g) --gpus all'
-            apptainer.runOptions    = '--nv'
-            singularity.runOptions  = '--nv'
-        process{
-                withLabel:process_gpu {
-                    queue = 'shared-gpu'
-                    clusterOptions = '--qos=limitgpus --gpus=a40:1 --exclude compms-gpu-1.exbio.wzw.tum.de'
-                }
+```
+profiles {
+    ...
+    gpu {
+        process {
+            withLabel:process_gpu {
+                queue = 'shared-gpu'
+                clusterOptions = '--qos=limitgpus --gpus=a40:1 --exclude small-gpu'
             }
         }
-        }
-} 
+    }
+}
 ```
 
-### 4. View the report
+### View the report
 
-One combined report for the whole run: open `results/multiqc/multiqc_report.html` in a browser. Content that's comparable across datasets (General Statistics, Classifier Performance, Positive vs Negative Pairs) is merged into one table/chart with an `ID` column identifying the dataset; content that's inherently per-dataset (PPI Partitioning, the similarity heatmap, the bias-analysis scatter plot) appears as its own separate, dataset-labelled panel.
+The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which you can view in a browser.
 
 ---
 
@@ -245,14 +237,14 @@ nextflow run main.nf --samplesheet samplesheet.csv --outdir results --split_only
 that, every samplesheet row must supply all of the following (no fallback to
 fetching/computing them):
 
-| Column           | Precomputed file                                    |
-|------------------|------------------------------------------------------|
-| `ppis`           | PPI CSV                                               |
-| `sequences`      | `sequences.fasta`                                     |
-| `go_annotations` | `go_annotations.tsv`                                  |
-| `species`        | `species.tsv`                                         |
-| `partition`      | KaHIP's `partitioned_proteome.txt`                    |
-| `node_mapping`   | `node_mapping.tsv`                                    |
+| Column           | Precomputed file                   |
+|------------------|------------------------------------|
+| `ppis`           | PPI CSV                            |
+| `sequences`      | `sequences.fasta`                  |
+| `go_annotations` | `go_annotations.tsv`               |
+| `species`        | `species.tsv`                      |
+| `partition`      | KaHIP's `partitioned_proteome.txt` |
+| `node_mapping`   | `node_mapping.tsv`                 |
 
 `candidate_network` remains optional, same as a normal run. `split_method`
 and `negative_sampling_method` are forced to `ilp` regardless of what the
@@ -344,21 +336,18 @@ see the samplesheet column reference in
 values below are just the `nextflow.config` fallback used for any row that
 leaves them blank.
 
-| Parameter                                           | Default       | Description                                                                                                                                                                  |
-|-----------------------------------------------------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `negative_sampling_method`                          | `default`     | `default` (random) or `ilp`                                                                                                                                                  |
-| `candidate_network`                               | `null`        | Optional CSV (`protein1,protein2`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Required for large protein universes (see below). |
-| `neg_ilp_lambda_degree`                           | `0.6`         | Weight of the per-protein aggregate degree-matching term                                                                                                                     |
-| `neg_ilp_lambda_taxon_pair`                       | `0.0`         | Weight of the global taxon-pair matching term                                                                                                                                |
-| `neg_ilp_lambda_self_loop`                        | `0.1`         | Weight of the self-interaction count matching term                                                                                                                           |
-| `neg_ilp_lambda_jaccard`                          | `0.3`         | Weight of the mean GO-BP Jaccard matching term                                                                                                                               |
-| `neg_ilp_solver`                                  | `auto`        | `auto`, `gurobi`, `scip`, or `highs`. `auto` tries Gurobi first, then falls back to an open-source solver.                                                                   |
-| `neg_ilp_time_limit`                              | `3600`        | Solver time limit in seconds                                                                                                                                                 |
-| `neg_ilp_mip_gap`                                 | `0.01`        | Solver MIP gap tolerance                                                                                                                                                     |
-| `gurobi_license`                                  | `null`        | Path to a Gurobi license file, only used if the `gurobi` solver is selected                                                                                                  |
-
-The active `--neg_ilp_lambda_*` weights are recommended to sum to 1, but this
-is not enforced by the script.
+| Parameter                   | Default   | Description                                                                                                                                                              |
+|-----------------------------|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `negative_sampling_method`  | `default` | `default` (random) or `ilp`                                                                                                                                              |
+| `candidate_network`         | `null`    | Optional CSV (`protein1,protein2`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Required for large protein universes (see below). |
+| `neg_ilp_lambda_degree`     | `1.0`     | Weight of the per-protein aggregate degree-matching term                                                                                                                 |
+| `neg_ilp_lambda_taxon_pair` | `1.0`     | Weight of the global taxon-pair matching term                                                                                                                            |
+| `neg_ilp_lambda_self_loop`  | `1.0`     | Weight of the self-interaction count matching term                                                                                                                       |
+| `neg_ilp_lambda_jaccard`    | `1.0`     | Weight of the mean GO-BP Jaccard matching term                                                                                                                           |
+| `neg_ilp_solver`            | `auto`    | `auto`, `gurobi`, `scip`, or `highs`. `auto` tries Gurobi first, then falls back to an open-source solver.                                                               |
+| `neg_ilp_time_limit`        | `7200`    | Solver time limit in seconds                                                                                                                                             |
+| `neg_ilp_mip_gap`           | `0.01`    | Solver MIP gap tolerance                                                                                                                                                 |
+| `gurobi_license`            | `null`    | Path to a Gurobi license file, only used if the `gurobi` solver is selected                                                                                              |
 
 For Gurobi, install it yourself and point `--gurobi_license` at your license
 file (`pip install gurobipy` is already pulled in by `environment.yml`). With
