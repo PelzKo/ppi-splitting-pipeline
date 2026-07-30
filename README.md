@@ -1,4 +1,18 @@
+<table width="100%" border="0" cellpadding="0" cellspacing="0">
+<tr>
+<td valign="middle">
+
 # PPI Splitting Pipeline
+
+</td>
+<td width="150" valign="middle">
+
+<img src="logo.png" alt="logo" width="150"/>
+
+</td>
+</tr>
+</table>
+
 ![Pipeline overview](metro_map.svg)
 
 Automated leakage-aware splitting of a protein–protein interaction (PPI) dataset into train, validation, and test sets, with redundancy removal, negative sampling, embedding-based classification, and bias analysis.
