@@ -81,6 +81,15 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
     Objective (minimize): the data loss, i.e., PPIs between clusters assigned to different splits.
         min_X Σ_{i=1}^{n-1}Σ_{j=i+1}^{n} k(c_i,c_j) * (1 - Σ_{s=1}^S x[s,c_i] * x[s,c_j])
     """
+    # A split with fraction 0 must end up empty, but constraint 3 alone cannot enforce
+    # that: (1-ε)·0·total ≤ ppi_in_s holds for any assignment, and there is no upper
+    # bound, so the solver is free to park clusters there if it lowers the loss. Drop
+    # such splits from the model entirely instead. main() still writes their (empty)
+    # csv/fasta, so channel topology, CD-HIT pairing and MultiQC series stay uniform.
+    active = [s for s, frac in enumerate(splits) if frac > 0]
+    splits = [splits[s] for s in active]
+    names = [names[s] for s in active]
+
     n_splits = len(splits)
     n_clusters = len(clusters_list)
 

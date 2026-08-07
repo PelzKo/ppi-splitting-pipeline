@@ -42,15 +42,21 @@ def main():
     random.Random(args.seed).shuffle(shuffled)
 
     n = len(shuffled)
-    n_train = round(n * args.train_split)
-    n_val = round(n * args.val_split)
-    # test absorbs whatever rounding drift is left over, rather than being
-    # computed from --test-split directly.
-    buckets = {
-        "train": shuffled[:n_train],
-        "val": shuffled[n_train : n_train + n_val],
-        "test": shuffled[n_train + n_val :],
-    }
+    fracs = {"train": args.train_split, "val": args.val_split, "test": args.test_split}
+    counts = {name: round(n * f) for name, f in fracs.items()}
+
+    # Rounding drift goes to the largest split that actually asked for rows. test used
+    # to absorb the remainder unconditionally, which silently made --test-split 0 a
+    # no-op; a 0-fraction split has to come out genuinely empty.
+    active = [name for name, f in fracs.items() if f > 0]
+    if active:
+        largest = max(active, key=lambda name: fracs[name])
+        counts[largest] += n - sum(counts.values())
+
+    buckets, start = {}, 0
+    for name in ("train", "val", "test"):
+        buckets[name] = shuffled[start : start + counts[name]]
+        start += counts[name]
 
     split_results = []
     for name, rows in buckets.items():

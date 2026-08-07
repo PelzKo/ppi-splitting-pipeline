@@ -65,15 +65,23 @@ process CDHIT2D {
     tuple val(meta), val(label), path("cdhit.out"), emit: sim
 
     script:
+    // cd-hit-2d errors out on an empty -i2, which happens whenever db2's split has a
+    // 0 fraction. An empty cdhit.out is the correct answer anyway -- REMOVE_REDUNDANT
+    // reads it as "nothing to keep" and the split stays empty -- so guard here rather
+    // than filtering the channel, which would drop the dataset from the 9-way join.
     """
-    cd-hit-2d \\
-        -i  ${db1_fasta} \\
-        -i2 ${db2_fasta} \\
-        -o  cdhit.out \\
-        -c  ${meta.cdhit_identity} \\
-        -n  ${meta.cdhit_wordsize} \\
-        -T  ${task.cpus} \\
-        -M  4000
+    if [ -s ${db2_fasta} ]; then
+        cd-hit-2d \\
+            -i  ${db1_fasta} \\
+            -i2 ${db2_fasta} \\
+            -o  cdhit.out \\
+            -c  ${meta.cdhit_identity} \\
+            -n  ${meta.cdhit_wordsize} \\
+            -T  ${task.cpus} \\
+            -M  4000
+    else
+        touch cdhit.out
+    fi
     """
 }
 

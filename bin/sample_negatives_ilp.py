@@ -1332,10 +1332,30 @@ def sample_negatives_ilp(
         "n_candidates": len(ctx.candidates),
     }
 
-    if ctx.n_pos == 0:
-        raise ValueError(f"{name}: no positive pairs found in the input.")
-    if ctx.n_neg == 0:
-        raise ValueError(f"{name}: no negative pairs found in the input.")
+    if ctx.n_pos == 0 or ctx.n_neg == 0:
+        # A split with a 0 fraction is legal (see solve_ilp.py), and it arrives here as
+        # an empty positives file. Emit an empty labelled CSV and report it, rather than
+        # failing the run: downstream channel topology and the MultiQC series stay
+        # uniform, and the split simply shows up with zero rows.
+        logging.warning(
+            "%s: %d positives / %d negatives -- writing an empty split without solving.",
+            name,
+            ctx.n_pos,
+            ctx.n_neg,
+        )
+        write_split_csv(pos_ppis, [], ctx.idx_to_protein, output_path)
+        return {
+            **base_diag,
+            "obj_value": 0.0,
+            "bias_deg_term": 0.0,
+            "bias_tax_term": 0.0,
+            "bias_self_term": 0.0,
+            "bias_jac_term": 0.0,
+            "solver": "none",
+            "wall_time_s": 0.0,
+            "mip_gap": 0.0,
+            "status": "empty split",
+        }, ctx
 
     if ctx.n_neg == len(ctx.candidates):
         logging.info(
