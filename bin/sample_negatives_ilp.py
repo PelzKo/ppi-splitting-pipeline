@@ -1290,6 +1290,39 @@ def sample_negatives_ilp(
             go_membership=go_membership,
             go_sizes=go_sizes,
         )
+    # A split can legitimately be empty: a 0 split fraction (see solve_ilp.py) reaches
+    # this script as a header-only positives file. Bail out here, before the diagnostics
+    # below reduce over a zero-size candidate array (np.max raises on one) and before
+    # build_context, whose per-protein degree arrays are equally undefined. Writing an
+    # empty labelled CSV keeps channel topology and the MultiQC series uniform.
+    n_pos = int(len(pos_pairs))
+    n_neg = int(round(neg_ratio * n_pos))
+    if n_pos == 0 or n_neg == 0 or len(candidates) == 0:
+        logging.warning(
+            "%s: %d positives / %d negatives / %d candidates -- writing an empty split.",
+            name,
+            n_pos,
+            n_neg,
+            len(candidates),
+        )
+        write_split_csv(pos_ppis, [], idx_to_protein, output_path)
+        return {
+            "split": name,
+            "n_pos": n_pos,
+            "n_neg": n_neg,
+            "r": neg_ratio,
+            "n_candidates": int(len(candidates)),
+            "obj_value": 0.0,
+            "bias_deg_term": 0.0,
+            "bias_tax_term": 0.0,
+            "bias_self_term": 0.0,
+            "bias_jac_term": 0.0,
+            "solver": "none",
+            "wall_time_s": 0.0,
+            "mip_gap": 0.0,
+            "status": "empty split",
+        }, None
+
     print(f"Candidate pool size: {len(candidates)}", file=sys.stderr)
     print(
         f"Number of unique proteins in the candidate set: {np.max(candidates)}",
@@ -1332,30 +1365,12 @@ def sample_negatives_ilp(
         "n_candidates": len(ctx.candidates),
     }
 
-    if ctx.n_pos == 0 or ctx.n_neg == 0:
-        # A split with a 0 fraction is legal (see solve_ilp.py), and it arrives here as
-        # an empty positives file. Emit an empty labelled CSV and report it, rather than
-        # failing the run: downstream channel topology and the MultiQC series stay
-        # uniform, and the split simply shows up with zero rows.
-        logging.warning(
-            "%s: %d positives / %d negatives -- writing an empty split without solving.",
-            name,
-            ctx.n_pos,
-            ctx.n_neg,
-        )
-        write_split_csv(pos_ppis, [], ctx.idx_to_protein, output_path)
-        return {
-            **base_diag,
-            "obj_value": 0.0,
-            "bias_deg_term": 0.0,
-            "bias_tax_term": 0.0,
-            "bias_self_term": 0.0,
-            "bias_jac_term": 0.0,
-            "solver": "none",
-            "wall_time_s": 0.0,
-            "mip_gap": 0.0,
-            "status": "empty split",
-        }, ctx
+    # Unreachable for a legitimately empty split -- that is caught before the candidate
+    # diagnostics above. These remain as tripwires for a genuinely unexpected state.
+    if ctx.n_pos == 0:
+        raise ValueError(f"{name}: no positive pairs found in the input.")
+    if ctx.n_neg == 0:
+        raise ValueError(f"{name}: no negative pairs found in the input.")
 
     if ctx.n_neg == len(ctx.candidates):
         logging.info(
