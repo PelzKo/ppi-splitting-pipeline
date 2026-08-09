@@ -459,6 +459,15 @@ def derived_key(release, families, pool_size, seed):
 # ---------------------------------------------------------------------------
 
 
+def _sample(items, limit=20):
+    """Render a list for a log line, truncated -- a full-Pfam run can report
+    thousands of families and the count is the actionable part, not the tail."""
+    items = sorted(items)
+    if len(items) <= limit:
+        return ", ".join(items)
+    return f"{', '.join(items[:limit])}, ... and {len(items) - limit} more"
+
+
 def read_families(args):
     """Return the sorted set of requested Pfam families from --domains or --families."""
     if args.domains:
@@ -590,11 +599,11 @@ def main():
         killed = sorted(f for f in missing if f in dead)
         unknown = sorted(f for f in missing if f not in dead)
         if killed:
-            print(f"Warning: {len(killed)} requested families are dead in Pfam: {killed}", file=sys.stderr)
+            print(f"Warning: {len(killed)} requested families are dead in Pfam: {_sample(killed)}", file=sys.stderr)
         if unknown:
             print(
-                f"Warning: {len(unknown)} requested families have no instances and are not "
-                f"listed as dead: {unknown}",
+                f"Warning: {len(unknown)} requested families have no instances in Pfam-A.fasta "
+                f"and are not listed as dead: {_sample(unknown)}",
                 file=sys.stderr,
             )
 
