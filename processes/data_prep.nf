@@ -16,6 +16,38 @@ process FETCH_DATA {
     """
 }
 
+// DDI mode's FETCH_DATA: turns a list of Pfam family accessions into sampled
+// domain instances plus the same sequences/species/GO artefacts DATA_PREP emits
+// in PPI mode, from bulk Pfam/UniProt downloads and one streaming pass.
+process FETCH_DOMAIN_META {
+    publishDir(path: { "${params.outdir}/${meta.id}/data" }, mode: 'copy')
+    tag "${meta.id}"
+
+    input:
+    tuple val(meta), path(families), path(clans)  // families: plain text, one Pfam accession per line; clans: [] to download
+
+    output:
+    tuple val(meta), path("sequences.fasta"),    emit: sequences
+    tuple val(meta), path("go_annotations.tsv"), emit: go_annotations
+    tuple val(meta), path("species.tsv"),        emit: species
+    tuple val(meta), path("instances.tsv"),      emit: instances
+
+    script:
+    def pool_size  = (params.ddi_examples_target as int) * (params.ddi_examples_pool_factor as int)
+    def clans_arg  = clans              ? "--clans ${clans}"                        : ''
+    def cache_arg  = params.interpro_cache ? "--interpro-cache ${params.interpro_cache}" : ''
+    def fasta_arg  = params.pfam_fasta  ? "--pfam-fasta ${params.pfam_fasta}"       : ''
+    """
+    fetch_domains.py \\
+        --families  ${families} \\
+        --pool-size ${pool_size} \\
+        --seed      ${params.seed} \\
+        ${clans_arg} \\
+        ${cache_arg} \\
+        ${fasta_arg}
+    """
+}
+
 process GET_LENGTHS {
     tag "${meta.id}"
 
