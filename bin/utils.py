@@ -68,6 +68,41 @@ def write_ppi_csv(rows, path):
 
 
 # ---------------------------------------------------------------------------
+# Domain instance table I/O (DDI mode)
+# ---------------------------------------------------------------------------
+
+INSTANCE_COLUMNS = ["instance_id", "family", "clan", "protein_id", "start", "end", "taxon_id", "source_db"]
+
+
+def read_instances(path):
+    """Return list of row dicts from an instances.tsv (bin/fetch_domains.py's output).
+
+    One table serves every DDI-mode consumer: MAKE_METIS reads
+    instance_id -> clan, the splitters invert to family -> {instance_id} and
+    read family -> clan, SELECT_EXAMPLES reads protein_id. Callers build the
+    dict they need -- keeping a single reader is what stops two views of the
+    same file from disagreeing.
+    """
+    rows = []
+    with open(path) as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        missing = [c for c in INSTANCE_COLUMNS if c not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{path} is missing instances.tsv column(s): {', '.join(missing)}")
+        for row in reader:
+            rows.append({c: row[c].strip() for c in INSTANCE_COLUMNS})
+    return rows
+
+
+def instances_by_family(rows):
+    """Invert read_instances() output to {family: {instance_id}}."""
+    members = {}
+    for row in rows:
+        members.setdefault(row["family"], set()).add(row["instance_id"])
+    return members
+
+
+# ---------------------------------------------------------------------------
 # KaHIP partition I/O
 # ---------------------------------------------------------------------------
 

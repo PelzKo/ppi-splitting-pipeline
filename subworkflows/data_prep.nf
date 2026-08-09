@@ -50,9 +50,15 @@ workflow DATA_PREP {
     species_ch        = precomputed_species.mix(subset_out.species)
     lengths_ch        = precomputed_lengths.mix(subset_out.lengths)
 
+    // DATA_PREP_DDI emits a real instances.tsv here; PPI mode has none. Emit an
+    // explicit placeholder rather than nothing: downstream joins key on meta,
+    // and a missing item would drop the whole dataset from the run silently.
+    instances_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network -> tuple(meta, []) }
+
     emit:
     sequences      = sequences_ch
     go_annotations = go_annotations_ch
     species        = species_ch
     lengths        = lengths_ch
+    instances      = instances_ch
 }

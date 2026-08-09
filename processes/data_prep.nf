@@ -24,7 +24,8 @@ process FETCH_DOMAIN_META {
     tag "${meta.id}"
 
     input:
-    tuple val(meta), path(families), path(clans)  // families: plain text, one Pfam accession per line; clans: [] to download
+    tuple val(meta), path(families)  // plain text, one Pfam family accession per line
+    path clans                       // Pfam-A.clans.tsv(.gz), or [] to download it
 
     output:
     tuple val(meta), path("sequences.fasta"),    emit: sequences
@@ -97,5 +98,65 @@ process SUBSET_FETCHED_DATA {
         --out_go_annotations go_annotations.tsv \\
         --out_species species.tsv \\
         --out_lengths lengths.tsv
+    """
+}
+
+// DDI mode's SUBSET_FETCHED_DATA. Same script, plus --instances: the DDI CSV's
+// id columns hold Pfam families while sequences/lengths are instance-keyed, so
+// the keep-set is resolved through the shared instances.tsv rather than taken
+// from the CSV directly (which would silently subset to nothing).
+process SUBSET_DOMAIN_DATA {
+    publishDir(path: { "${params.outdir}/${meta.id}/data" }, mode: 'copy', saveAs: { f -> f == 'lengths.tsv' ? null : f })
+    tag "${meta.id}"
+
+    input:
+    tuple val(meta), path(ddis)
+    path shared_sequences,      stageAs: 'shared_sequences.fasta'
+    path shared_go_annotations, stageAs: 'shared_go_annotations.tsv'
+    path shared_species,        stageAs: 'shared_species.tsv'
+    path shared_lengths,        stageAs: 'shared_lengths.tsv'
+    path shared_instances,      stageAs: 'shared_instances.tsv'
+
+    output:
+    tuple val(meta), path("sequences.fasta"),    emit: sequences
+    tuple val(meta), path("go_annotations.tsv"), emit: go_annotations
+    tuple val(meta), path("species.tsv"),        emit: species
+    tuple val(meta), path("lengths.tsv"),        emit: lengths
+    tuple val(meta), path("instances.tsv"),      emit: instances
+
+    script:
+    """
+    subset_fetched_data.py \\
+        --ppis ${ddis} \\
+        --sequences ${shared_sequences} \\
+        --go_annotations ${shared_go_annotations} \\
+        --species ${shared_species} \\
+        --lengths ${shared_lengths} \\
+        --instances ${shared_instances} \\
+        --out_sequences sequences.fasta \\
+        --out_go_annotations go_annotations.tsv \\
+        --out_species species.tsv \\
+        --out_lengths lengths.tsv \\
+        --out_instances instances.tsv
+    """
+}
+
+// DDI mode drops the GO bias attributes (they describe proteins, not domain
+// families), but --go_annotations stays a required flag downstream. A dataset
+// that supplies its own domain data therefore still needs the file to exist;
+// FETCH_DOMAIN_META writes the same header-only table for the fetched path.
+process EMPTY_GO_ANNOTATIONS {
+    publishDir(path: { "${params.outdir}/${meta.id}/data" }, mode: 'copy')
+    tag "${meta.id}"
+
+    input:
+    val meta
+
+    output:
+    tuple val(meta), path("go_annotations.tsv")
+
+    script:
+    """
+    printf 'protein_id\\tgo_bp\\tgo_mf\\tgo_cc\\n' > go_annotations.tsv
     """
 }

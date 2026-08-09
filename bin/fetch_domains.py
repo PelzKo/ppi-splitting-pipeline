@@ -49,7 +49,7 @@ from collections import Counter, defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fetch_data import _ssl_context, write_go_tsv, write_species_tsv
-from utils import read_ppis, write_fasta
+from utils import INSTANCE_COLUMNS, read_ppis, write_fasta
 
 PFAM_BASE = "https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release"
 PFAM_FASTA_URL = f"{PFAM_BASE}/Pfam-A.fasta.gz"
@@ -350,8 +350,6 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed):
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
-
-INSTANCE_COLUMNS = ["instance_id", "family", "clan", "protein_id", "start", "end", "taxon_id", "source_db"]
 
 
 def write_instances_tsv(path, by_family, clans, taxa, reviewed):

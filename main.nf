@@ -4,6 +4,7 @@ nextflow.enable.dsl=2
 include { samplesheetToList } from 'plugin/nf-schema'
 
 include { DATA_PREP }        from './subworkflows/data_prep'
+include { DATA_PREP_DDI }    from './subworkflows/data_prep_ddi'
 include { CLUSTERING }       from './subworkflows/clustering'
 include { SPLIT_POSITIVES }  from './subworkflows/split_positives'
 include { SAMPLE_NEGATIVES } from './subworkflows/sample_negatives'
@@ -23,7 +24,7 @@ def buildDatasetsChannel() {
     // samplesheetToList() returns each row as a positional list, not a map
     // -- order here must match assets/schema_input.json's `properties`.
     def fields = [
-        "id", "ppis", "sequences", "go_annotations", "species", "blast_results", "candidate_network",
+        "id", "ppis", "sequences", "go_annotations", "species", "domain_instances", "blast_results", "candidate_network",
         "partition", "node_mapping",
         "embedding_model", "cdhit_identity", "cdhit_wordsize", "split_method", "edge_weight",
         "kahip_k", "ilp_kahip_k", "train_split", "val_split", "test_split", "ilp_epsilon", "ilp_max_sec",
@@ -41,8 +42,14 @@ def buildDatasetsChannel() {
         // becomes mandatory, and the split/negative-sampling method choice
         // is no longer per-dataset -- it's always the ILP path.
         if (params.split_only) {
-            if (!(row.sequences && row.go_annotations && row.species && row.partition && row.node_mapping)) {
-                error("--split_only requires every samplesheet row to supply sequences, go_annotations, species, partition, and node_mapping (row '${row.id}' is missing at least one).")
+            // DDI mode has no GO annotations at all (they describe proteins, not
+            // domain families) and needs the domain instance table instead.
+            def required = params.ddi_mode
+                ? ["sequences", "species", "domain_instances", "partition", "node_mapping"]
+                : ["sequences", "go_annotations", "species", "partition", "node_mapping"]
+            def missing = required.findAll { !row[it] }
+            if (missing) {
+                error("--split_only requires every samplesheet row to supply ${required.join(', ')} (row '${row.id}' is missing ${missing.join(', ')}).")
             }
         }
 
@@ -72,6 +79,7 @@ def buildDatasetsChannel() {
             row.sequences         ? file(row.sequences,         checkIfExists: true) : [],
             row.go_annotations    ? file(row.go_annotations,    checkIfExists: true) : [],
             row.species           ? file(row.species,           checkIfExists: true) : [],
+            row.domain_instances  ? file(row.domain_instances,  checkIfExists: true) : [],
             row.blast_results     ? file(row.blast_results,     checkIfExists: true) : [],
             row.candidate_network ? file(row.candidate_network, checkIfExists: true) : [],
             row.partition         ? file(row.partition,         checkIfExists: true) : [],
@@ -83,24 +91,35 @@ def buildDatasetsChannel() {
 workflow {
     datasets_ch = buildDatasetsChannel()
 
-    ppis_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network, partition, node_mapping -> tuple(meta, ppis) }
+    ppis_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, ppis) }
 
-    data = DATA_PREP(
-        datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network, partition, node_mapping ->
-            tuple(meta, ppis, sequences, go_annotations, species, blast_results, candidate_network)
-        }
-    )
+    // DDI mode swaps the whole data-prep front end: Pfam family accessions in
+    // place of UniProt ones, domain instances in place of full chains. Both
+    // subworkflows emit the same channel names, so nothing downstream branches.
+    if (params.ddi_mode) {
+        data = DATA_PREP_DDI(
+            datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping ->
+                tuple(meta, ppis, sequences, species, domain_instances)
+            }
+        )
+    } else {
+        data = DATA_PREP(
+            datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping ->
+                tuple(meta, ppis, sequences, go_annotations, species, blast_results, candidate_network)
+            }
+        )
+    }
 
     if (params.split_only) {
         // --split_only: partition/node_mapping are precomputed and required
         // (validated in buildDatasetsChannel), so CLUSTERING (FETCH_DATA/
         // RUN_BLAST/MAKE_METIS/RUN_KAHIP) never needs to run at all.
-        partition_ch    = datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network, partition, node_mapping -> tuple(meta, partition) }
-        node_mapping_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network, partition, node_mapping -> tuple(meta, node_mapping) }
+        partition_ch    = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, partition) }
+        node_mapping_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, node_mapping) }
     } else {
         clustered = CLUSTERING(
             data.sequences, data.lengths,
-            datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network, partition, node_mapping -> tuple(meta, blast_results) }
+            datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, blast_results) }
         )
         partition_ch    = clustered.partition
         node_mapping_ch = clustered.node_mapping
@@ -111,7 +130,7 @@ workflow {
     neg = SAMPLE_NEGATIVES(
         split.train_ppis, split.val_ppis, split.test_ppis,
         data.species, data.go_annotations,
-        datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network, partition, node_mapping -> tuple(meta, candidate_network) }
+        datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, candidate_network) }
     )
 
     // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +

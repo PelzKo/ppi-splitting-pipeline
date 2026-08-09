@@ -39,6 +39,13 @@
         "errorMessage": "If supplied, species must be a path to an existing species file species.tsv",
         "pattern": "species\\.tsv$"
       },
+      "domain_instances": {
+        "type": "string",
+        "format": "file-path",
+        "exists": true,
+        "errorMessage": "If supplied, domain_instances must be a path to an existing instances.tsv. Only used with --ddi_mode, where it supplies precomputed domain instances alongside sequences and species (bypasses FETCH_DOMAIN_META).",
+        "pattern": "instances\\.tsv$"
+      },
       "blast_results": {
         "type": "string",
         "format": "file-path",
