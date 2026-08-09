@@ -63,7 +63,26 @@ def build_matrices(clusters_list, protein_to_cluster, ppi_rows):
     return cross_ppi, intra_ppi
 
 
-def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_sec, solver):
+def _seed_option(solver, seed):
+    """Solver-specific seed option, so a tie between equally-optimal assignments
+    is broken the same way on every run.
+
+    The objective is a sum of PPI counts over cluster pairs, so ties are the
+    normal case rather than an edge case: several assignments discard exactly
+    the same number of cross-cluster PPIs, and which one comes back is decided
+    by the solver's internal randomisation. Without this the splits are not
+    reproducible even at a fixed --seed. Mirrors sample_negatives_ilp._solver_options.
+    """
+    if solver == cp.GUROBI:
+        return {"Seed": seed}
+    if solver == cp.HIGHS:
+        return {"random_seed": seed}
+    if solver == cp.SCIP:
+        return {"scip_params": {"randomization/randomseedshift": seed}}
+    return {}
+
+
+def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_sec, solver, seed):
     """
     Variables: x[s, c] ∈ {0,1}  — cluster c assigned to split s.
 
@@ -145,8 +164,20 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
 
     kwargs = dict(time_limit=max_sec, verbose=True)
     if solver:
-        problem.solve(solver=solver, **kwargs)
+        seed_opt = _seed_option(solver, seed)
+        if not seed_opt:
+            print(
+                f"Warning: no seed option is known for solver {solver}, so its tie-breaking "
+                f"is unseeded and this split is not reproducible run to run.",
+                file=sys.stderr,
+            )
+        problem.solve(solver=solver, **kwargs, **seed_opt)
     else:
+        print(
+            "Warning: no --solver given, so CVXPY picks one and its internal randomisation "
+            "stays unseeded; pass --solver for a reproducible split.",
+            file=sys.stderr,
+        )
         problem.solve(**kwargs)
 
     if problem.status not in cp.settings.SOLUTION_PRESENT:
@@ -181,6 +212,7 @@ def main():
     )
     ap.add_argument("--max-sec", type=int, default=300, help="ILP solver time limit in seconds (default 300)")
     ap.add_argument("--solver", default=None, help="CVXPY solver name, e.g. SCIP, GLPK_MI (default: auto)")
+    ap.add_argument("--seed", type=int, default=42, help="solver tie-breaking seed (default 42)")
     args = ap.parse_args()
 
     splits = [args.train_split, args.val_split, args.test_split]
@@ -228,6 +260,7 @@ def main():
         args.epsilon,
         args.max_sec,
         args.solver,
+        args.seed,
     )
     if assignment is None:
         print("ILP did not find a feasible solution.", file=sys.stderr)

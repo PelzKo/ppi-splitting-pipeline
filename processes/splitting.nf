@@ -117,6 +117,7 @@ process SOLVE_ILP {
         --test-split  ${meta.test_split} \\
         --epsilon     ${meta.ilp_epsilon} \\
         --max-sec     ${meta.ilp_max_sec} \\
+        --seed        ${params.seed} \\
         ${params.ilp_solver ? "--solver ${params.ilp_solver}" : ""}
     """
 }

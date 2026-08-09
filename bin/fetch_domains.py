@@ -182,10 +182,16 @@ def parse_dead(text):
 class Reservoir:
     """Algorithm-R reservoir over one (family, tier) stratum.
 
-    The RNG is seeded per family and tier rather than globally, so which
-    instances a family contributes depends only on that family's own records --
-    not on how many families precede it in the stream, nor on how many other
-    strata were offered a record in between.
+    Every reservoir derives from the run's single --seed (params.seed); the
+    family and tier only namespace it, so which instances a family contributes
+    depends on that family's own records and nothing else -- not on how many
+    families precede it in the stream, nor on how many other strata were
+    offered a record in between. One global RNG would instead make a family's
+    sample depend on stream position, so adding one family to the samplesheet
+    would resample every family after it.
+
+    random.Random() seeds a str via SHA-512, not hash(), so this is stable
+    across processes and independent of PYTHONHASHSEED.
     """
 
     __slots__ = ("k", "rng", "buf", "seen")
