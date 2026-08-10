@@ -75,3 +75,53 @@ process SAMPLE_NEGATIVES_ILP {
         --id                 ${meta.id}
     """
 }
+
+// DDI mode only. Both samplers above work at Pfam family level; this turns the
+// family pairs they labelled into the domain-instance pairs the classifier needs
+// -- positives by looking up SELECT_EXAMPLES' Barrier-B-vetted choices,
+// negatives by drawing carriers from that split's protein universe.
+process EXPAND_NEGATIVES {
+    publishDir(path: { "${params.outdir}/${meta.id}" }, mode: 'copy', saveAs: { f -> f.endsWith('_mqc.tsv') ? null : f })
+    tag "${meta.id}_${label}"
+    label 'error_retry'
+
+    input:
+    // split is the SELECT_EXAMPLES split whose files are staged here (test for
+    // both test_balanced and test_realistic); label is the sampling label. The
+    // labelled CSV is staged under a fixed name because it arrives as
+    // "${label}.csv" -- see SAMPLE_NEGATIVES_DEGREE for why that would corrupt
+    // the upstream task's cached output on -resume.
+    tuple val(meta), val(split), val(label),
+          path(labelled, stageAs: 'labelled_in.csv'),
+          path(examples), path(candidate_examples), path(universe), path(fasta),
+          path(unclaimed), path(instances)
+
+    output:
+    tuple val(meta), val(label), path("${label}_instances.csv"), emit: labelled
+    tuple val(meta), path("${label}*_mqc.tsv"),                  emit: mqc
+
+    script:
+    // Matches the flag SELECT_EXAMPLES was given for this dataset: with
+    // split_method=random the universes deliberately overlap, so the unclaimed
+    // reserve is not partitioned between splits either.
+    def barrier_arg = meta.split_method == "random" ? "--no-barrier-b" : ''
+    """
+    expand_negatives.py \\
+        --labelled           ${labelled} \\
+        --examples           ${examples} \\
+        --candidate-examples ${candidate_examples} \\
+        --universe           ${universe} \\
+        --unclaimed          ${unclaimed} \\
+        --instances          ${instances} \\
+        --fasta              ${fasta} \\
+        --output             ${label}_instances.csv \\
+        --split-name         ${label} \\
+        --examples-target    ${params.ddi_examples_target} \\
+        --train-split        ${meta.train_split} \\
+        --val-split          ${meta.val_split} \\
+        --test-split         ${meta.test_split} \\
+        ${barrier_arg} \\
+        --seed               ${params.seed} \\
+        --id                 ${meta.id}
+    """
+}

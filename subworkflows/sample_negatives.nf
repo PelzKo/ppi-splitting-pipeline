@@ -1,8 +1,13 @@
-include { SAMPLE_NEGATIVES_DEGREE; SAMPLE_NEGATIVES_ILP } from '../processes/negative_sampling'
+include { SAMPLE_NEGATIVES_DEGREE; SAMPLE_NEGATIVES_ILP; EXPAND_NEGATIVES } from '../processes/negative_sampling'
 
 // Samples negative PPIs for each split, using the degree-preserving
 // sampler, a fully-uniform variant, or the bias-aware ILP sampler --
 // selected per-dataset via meta.negative_sampling_method.
+//
+// In DDI mode the samplers still run at Pfam family level -- families are
+// split-exclusive and species.tsv carries family rows, so every bias term works
+// unchanged -- and EXPAND_NEGATIVES then turns each labelled family pair into
+// domain-instance pairs, which is the vocabulary the embeddings are keyed by.
 workflow SAMPLE_NEGATIVES {
     take:
     train_ppis            // tuple(meta, path)
@@ -11,6 +16,9 @@ workflow SAMPLE_NEGATIVES {
     species_ch              // tuple(meta, path)
     go_annotations_ch        // tuple(meta, path)
     candidate_network_ch      // tuple(meta, candidate_network_or_[])
+    ddi_files_ch               // tuple(meta, split, examples, cand_examples, universe, fasta); empty in PPI mode
+    unclaimed_ch                // tuple(meta, path); empty in PPI mode
+    instances_ch                 // tuple(meta, instances_or_[])
 
     main:
     // One channel, one process: each (meta, label) item becomes its own
@@ -55,8 +63,27 @@ workflow SAMPLE_NEGATIVES {
     }
     degree_out = SAMPLE_NEGATIVES_DEGREE(uniform_inputs.mix(default_inputs))
 
-    neg_labelled = ilp_out.labelled.mix(degree_out.labelled)
-    neg_mqc      = ilp_out.mqc.mix(degree_out.mqc)
+    fam_labelled = ilp_out.labelled.mix(degree_out.labelled)
+    fam_mqc      = ilp_out.mqc.mix(degree_out.mqc)
+
+    if (params.ddi_mode) {
+        // combine(by: [0, 1]) rather than join: test_balanced and test_realistic
+        // both key onto the "test" bundle, and join is 1:1 so it would silently
+        // drop one of them.
+        exp_inputs = fam_labelled
+            .map { meta, label, f -> tuple(meta, label.startsWith("test") ? "test" : label, label, f) }
+            .combine(ddi_files_ch, by: [0, 1])
+            .combine(unclaimed_ch, by: 0)
+            .combine(instances_ch, by: 0)
+        // tuple(meta, split, label, labelled, examples, cand_examples, universe, fasta, unclaimed, instances)
+
+        exp_out      = EXPAND_NEGATIVES(exp_inputs)
+        neg_labelled = exp_out.labelled
+        neg_mqc      = fam_mqc.mix(exp_out.mqc)
+    } else {
+        neg_labelled = fam_labelled
+        neg_mqc      = fam_mqc
+    }
 
     neg_branched = neg_labelled.branch {
         meta, label, f ->
@@ -71,5 +98,9 @@ workflow SAMPLE_NEGATIVES {
     val            = neg_branched.val.map            { meta, label, f -> tuple(meta, f) }
     test_balanced  = neg_branched.test_balanced.map  { meta, label, f -> tuple(meta, f) }
     test_realistic = neg_branched.test_realistic.map { meta, label, f -> tuple(meta, f) }
-    mqc            = neg_mqc
+    // The family-level CSVs, before instance expansion. Identical to the four
+    // channels above in PPI mode; in DDI mode this is the level the DDI graph's
+    // own diagnostics (family degree, taxon pairs) have to be computed on.
+    family_labelled = fam_labelled
+    mqc             = neg_mqc
 }

@@ -95,15 +95,16 @@ workflow SPLIT_POSITIVES {
         out_train_ppis = sel.train_ppis
         out_val_ppis   = sel.val_ppis
         out_test_ppis  = sel.test_ppis
-        examples       = sel.train_examples.map { meta, f -> tuple(meta, "train", f) }
-            .mix(sel.val_examples.map  { meta, f -> tuple(meta, "val", f) })
-            .mix(sel.test_examples.map { meta, f -> tuple(meta, "test", f) })
-        universes      = sel.train_universe.map { meta, f -> tuple(meta, "train", f) }
-            .mix(sel.val_universe.map  { meta, f -> tuple(meta, "val", f) })
-            .mix(sel.test_universe.map { meta, f -> tuple(meta, "test", f) })
-        cand_examples  = sel.train_candidates.map { meta, f -> tuple(meta, "train", f) }
-            .mix(sel.val_candidates.map  { meta, f -> tuple(meta, "val", f) })
-            .mix(sel.test_candidates.map { meta, f -> tuple(meta, "test", f) })
+        // Everything EXPAND_NEGATIVES needs about one split, in a single item
+        // keyed (meta, split), so SAMPLE_NEGATIVES can pick it up with one
+        // combine(by: [0, 1]) -- and so the test entry is broadcast to both
+        // test_balanced and test_realistic rather than joined 1:1 with one of them.
+        ddi_files = sel.train_examples.join(sel.train_candidates).join(sel.train_universe).join(fasta_train)
+                .map { meta, ex, cand, uni, fa -> tuple(meta, "train", ex, cand, uni, fa) }
+            .mix(sel.val_examples.join(sel.val_candidates).join(sel.val_universe).join(fasta_val)
+                .map { meta, ex, cand, uni, fa -> tuple(meta, "val", ex, cand, uni, fa) })
+            .mix(sel.test_examples.join(sel.test_candidates).join(sel.test_universe).join(fasta_test)
+                .map { meta, ex, cand, uni, fa -> tuple(meta, "test", ex, cand, uni, fa) })
         unclaimed      = sel.unclaimed
         // Mixed into sorted_mqc rather than threaded through QC as a 17th take:
         // QC only collects that channel for MULTIQC, and both are splitting-stage
@@ -113,25 +114,23 @@ workflow SPLIT_POSITIVES {
         out_train_ppis = fam_train
         out_val_ppis   = fam_val
         out_test_ppis  = fam_test
-        examples       = channel.empty()
-        universes      = channel.empty()
-        cand_examples  = channel.empty()
+        ddi_files      = channel.empty()
         unclaimed      = channel.empty()
         sorted_mqc     = splitter_mqc
     }
 
     emit:
-    train_ppis    = out_train_ppis
-    val_ppis      = out_val_ppis
-    test_ppis     = out_test_ppis
-    train_fasta   = fasta_train
-    val_fasta     = fasta_val
-    test_fasta    = fasta_test
-    // DDI mode only; empty in PPI mode. tuple(meta, split_label, path).
-    examples      = examples
-    universes     = universes
-    cand_examples = cand_examples
-    unclaimed     = unclaimed
-    sorted_mqc    = sorted_mqc
-    nr_mqc        = nr.mqc
+    train_ppis  = out_train_ppis
+    val_ppis    = out_val_ppis
+    test_ppis   = out_test_ppis
+    train_fasta = fasta_train
+    val_fasta   = fasta_val
+    test_fasta  = fasta_test
+    // DDI mode only; both empty in PPI mode.
+    // ddi_files: tuple(meta, split, examples, candidate_examples, universe, fasta)
+    // unclaimed: tuple(meta, path) -- run-wide for the dataset, not per split
+    ddi_files   = ddi_files
+    unclaimed   = unclaimed
+    sorted_mqc  = sorted_mqc
+    nr_mqc      = nr.mqc
 }

@@ -64,8 +64,10 @@ import scipy.sparse as sp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import (  # noqa: E402
+    diverse_pick,
     instances_by_family,
     mqc_sample,
+    pair_candidates,
     read_fasta,
     read_instances,
     read_ppis,
@@ -94,52 +96,10 @@ class Unit:
 # ---------------------------------------------------------------------------
 # Candidate enumeration
 # ---------------------------------------------------------------------------
-
-
-def pair_candidates(fam1, fam2, members, available):
-    """Every instance pair that could represent the DDI (fam1, fam2).
-
-    Pure co-occurrence, per the design: any instance of fam1 against any
-    instance of fam2, with no PPI network consulted. `available` restricts to
-    instances that actually reached this split's FASTA -- instances.tsv can list
-    a family member whose sequence never arrived, and an example with no
-    sequence cannot be embedded.
-
-    A self-DDI (fam1 == fam2) yields unordered pairs *including* i == i, which
-    is the direct analogue of PPI mode's (P, P) self-interaction rows and is
-    what keeps a single-instance self-DDI representable at all. The diversity
-    term deprioritises them, since such a pair spends its parent's budget twice.
-    """
-    la = sorted(members.get(fam1, ()) & available)
-    if fam1 == fam2:
-        return [(a, b) for i, a in enumerate(la) for b in la[i:]]
-    lb = sorted(members.get(fam2, ()) & available)
-    return [(a, b) for a in la for b in lb]
-
-
-def diverse_pick(pairs, k, parent_of, rng):
-    """Pick <= k pairs, preferring ones whose parent proteins are still unused.
-
-    Realises the design's diversity preference -- P1-P2, P3-P4, P5-P6 over
-    P1-P2, P1-P3, P1-P4 -- for the units the ILP never needs to see, and doubles
-    as the shortlist trimmer. Deterministic given `rng`.
-    """
-    if k <= 0 or not pairs:
-        return []
-    order = sorted(pairs)
-    rng.shuffle(order)
-    used, chosen, remaining = defaultdict(int), [], set(range(len(order)))
-    while len(chosen) < k and remaining:
-        best = min(
-            remaining,
-            key=lambda i: (used[parent_of[order[i][0]]] + used[parent_of[order[i][1]]], i),
-        )
-        remaining.discard(best)
-        a, b = order[best]
-        used[parent_of[a]] += 1
-        used[parent_of[b]] += 1
-        chosen.append(order[best])
-    return chosen
+#
+# pair_candidates() and diverse_pick() live in utils.py: EXPAND_NEGATIVES draws
+# the sampled negatives' instance pairs by the same two rules, and it must not
+# import this module (which would pull cvxpy into a process that needs no solver).
 
 
 def build_units(kind, rows_by_split, members, split_ids, parent_of, shortlist_k, seed):

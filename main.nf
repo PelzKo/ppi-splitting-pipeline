@@ -72,7 +72,14 @@ def buildDatasetsChannel() {
             neg_ilp_lambda_degree    : isGiven(row.neg_ilp_lambda_degree)     ? row.neg_ilp_lambda_degree     : params.neg_ilp_lambda_degree,
             neg_ilp_lambda_taxon_pair: isGiven(row.neg_ilp_lambda_taxon_pair) ? row.neg_ilp_lambda_taxon_pair : params.neg_ilp_lambda_taxon_pair,
             neg_ilp_lambda_self_loop : isGiven(row.neg_ilp_lambda_self_loop)  ? row.neg_ilp_lambda_self_loop  : params.neg_ilp_lambda_self_loop,
-            neg_ilp_lambda_jaccard   : isGiven(row.neg_ilp_lambda_jaccard)    ? row.neg_ilp_lambda_jaccard    : params.neg_ilp_lambda_jaccard,
+            // The Jaccard bias term matches GO-term overlap, and DDI mode has no
+            // GO annotations at all (they describe proteins, not domain families
+            // -- DATA_PREP_DDI emits a header-only table). 0 makes
+            // assemble_active_biases() skip the term outright rather than
+            // computing an all-zero one and reporting it as perfectly matched,
+            // so it overrides the samplesheet the same way --split_only
+            // overrides split_method above.
+            neg_ilp_lambda_jaccard   : params.ddi_mode ? 0 : (isGiven(row.neg_ilp_lambda_jaccard) ? row.neg_ilp_lambda_jaccard : params.neg_ilp_lambda_jaccard),
         ]
         tuple(meta,
             file(row.ppis, checkIfExists: true),
@@ -134,7 +141,11 @@ workflow {
     neg = SAMPLE_NEGATIVES(
         split.train_ppis, split.val_ppis, split.test_ppis,
         data.species, data.go_annotations,
-        candidate_network_ch
+        candidate_network_ch,
+        // DDI mode only (the first two are empty channels in PPI mode): the
+        // per-split example tables, protein universes and never-in-play proteins
+        // EXPAND_NEGATIVES turns family pairs into instance pairs with.
+        split.ddi_files, split.unclaimed, data.instances
     )
 
     // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +

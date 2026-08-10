@@ -3,6 +3,7 @@
 
 import csv
 import sys
+from collections import defaultdict
 
 import numpy as np
 
@@ -100,6 +101,56 @@ def instances_by_family(rows):
     for row in rows:
         members.setdefault(row["family"], set()).add(row["instance_id"])
     return members
+
+
+def pair_candidates(fam1, fam2, members, available):
+    """Every instance pair that could represent the interaction (fam1, fam2).
+
+    Pure co-occurrence, per the design: any instance of fam1 against any
+    instance of fam2, with no PPI network consulted. `available` restricts to
+    instances that actually reached this split's FASTA -- instances.tsv can list
+    a family member whose sequence never arrived, and an example with no
+    sequence cannot be embedded.
+
+    A self-interaction (fam1 == fam2) yields unordered pairs *including* i == i,
+    which is the direct analogue of PPI mode's (P, P) rows and is what keeps a
+    single-instance self-DDI representable at all. The diversity term
+    deprioritises them, since such a pair spends its parent's budget twice.
+
+    Shared by SELECT_EXAMPLES (positives, candidate_network negatives) and
+    EXPAND_NEGATIVES (sampled negatives), so both levels of DDI mode draw their
+    instance pairs by exactly the same rule.
+    """
+    la = sorted(members.get(fam1, ()) & available)
+    if fam1 == fam2:
+        return [(a, b) for i, a in enumerate(la) for b in la[i:]]
+    lb = sorted(members.get(fam2, ()) & available)
+    return [(a, b) for a in la for b in lb]
+
+
+def diverse_pick(pairs, k, parent_of, rng):
+    """Pick <= k pairs, preferring ones whose parent proteins are still unused.
+
+    Realises the design's diversity preference -- P1-P2, P3-P4, P5-P6 over
+    P1-P2, P1-P3, P1-P4 -- and doubles as SELECT_EXAMPLES' shortlist trimmer.
+    Deterministic given `rng`.
+    """
+    if k <= 0 or not pairs:
+        return []
+    order = sorted(pairs)
+    rng.shuffle(order)
+    used, chosen, remaining = defaultdict(int), [], set(range(len(order)))
+    while len(chosen) < k and remaining:
+        best = min(
+            remaining,
+            key=lambda i: (used[parent_of[order[i][0]]] + used[parent_of[order[i][1]]], i),
+        )
+        remaining.discard(best)
+        a, b = order[best]
+        used[parent_of[a]] += 1
+        used[parent_of[b]] += 1
+        chosen.append(order[best])
+    return chosen
 
 
 def expand_members(groups, members):
