@@ -92,6 +92,9 @@ workflow {
     datasets_ch = buildDatasetsChannel()
 
     ppis_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, ppis) }
+    // Read by both SPLIT_POSITIVES (DDI mode's SELECT_EXAMPLES, where the pairs'
+    // parent proteins join the Barrier B claim accounting) and SAMPLE_NEGATIVES.
+    candidate_network_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, candidate_network) }
 
     // DDI mode swaps the whole data-prep front end: Pfam family accessions in
     // place of UniProt ones, domain instances in place of full chains. Both
@@ -126,12 +129,12 @@ workflow {
         node_mapping_ch = clustered.node_mapping
     }
 
-    split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch, data.instances)
+    split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch, data.instances, candidate_network_ch)
 
     neg = SAMPLE_NEGATIVES(
         split.train_ppis, split.val_ppis, split.test_ppis,
         data.species, data.go_annotations,
-        datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, candidate_network) }
+        candidate_network_ch
     )
 
     // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +

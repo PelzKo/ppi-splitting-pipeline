@@ -132,6 +132,73 @@ process SOLVE_ILP {
     """
 }
 
+// DDI mode only. The split CSVs above hold Pfam family pairs; this turns each
+// one into up to N domain-instance pairs and, in the same ILP, claims every
+// parent protein for at most one split (Barrier B). It re-emits the family CSVs
+// because a DDI whose every candidate was blocked ends up with zero examples and
+// is dropped from its split.
+process SELECT_EXAMPLES {
+    publishDir(path: { "${params.outdir}/${meta.id}/examples" }, mode: 'copy', saveAs: { f -> f.endsWith('_mqc.tsv') ? null : f })
+    tag "${meta.id}"
+    label 'error_retry'
+    label 'gurobi'
+
+    input:
+    // instances and candidate_network are the two .join()ed tails, in that order
+    // -- positional and unchecked, so a slot out of place stages the wrong file.
+    tuple val(meta),
+          path(train_ppis), path(val_ppis), path(test_ppis),
+          path(train_fasta), path(val_fasta), path(test_fasta),
+          path(instances), path(candidate_network)
+    path gurobi_license
+
+    output:
+    tuple val(meta), path("train_sel.csv"), emit: train_ppis
+    tuple val(meta), path("val_sel.csv"),   emit: val_ppis
+    tuple val(meta), path("test_sel.csv"),  emit: test_ppis
+    tuple val(meta), path("train_examples.csv"), emit: train_examples
+    tuple val(meta), path("val_examples.csv"),   emit: val_examples
+    tuple val(meta), path("test_examples.csv"),  emit: test_examples
+    tuple val(meta), path("train_universe.txt"), emit: train_universe
+    tuple val(meta), path("val_universe.txt"),   emit: val_universe
+    tuple val(meta), path("test_universe.txt"),  emit: test_universe
+    tuple val(meta), path("train_candidate_examples.csv"), emit: train_candidates
+    tuple val(meta), path("val_candidate_examples.csv"),   emit: val_candidates
+    tuple val(meta), path("test_candidate_examples.csv"),  emit: test_candidates
+    tuple val(meta), path("unclaimed.txt"), emit: unclaimed
+    tuple val(meta), path("*_mqc.tsv"),     emit: mqc
+
+    script:
+    def license_export = gurobi_license ? "export GRB_LICENSE_FILE=\$PWD/${gurobi_license}" : ""
+    def cand_arg       = candidate_network ? "--candidate-network ${candidate_network}" : ''
+    // split_method=random deliberately puts the same family in several splits so the
+    // naive baseline shows the leak; claiming each parent for one split would repair
+    // part of it, exactly like routing "random" through CD-HIT would.
+    def barrier_arg    = meta.split_method == "random" ? "--no-barrier-b" : ''
+    """
+    ${license_export}
+    select_examples.py \\
+        --train_ppis  ${train_ppis} \\
+        --val_ppis    ${val_ppis} \\
+        --test_ppis   ${test_ppis} \\
+        --train_fasta ${train_fasta} \\
+        --val_fasta   ${val_fasta} \\
+        --test_fasta  ${test_fasta} \\
+        --instances   ${instances} \\
+        ${cand_arg} \\
+        ${barrier_arg} \\
+        --examples-target   ${params.ddi_examples_target} \\
+        --shortlist-factor  ${params.ddi_shortlist_factor} \\
+        --candidate-factor  ${params.ddi_candidate_factor} \\
+        --lambda-diversity  ${params.ddi_lambda_diversity} \\
+        --max-sec           ${params.ddi_select_max_sec} \\
+        --seed              ${params.seed} \\
+        --id                ${meta.id} \\
+        --verbose \\
+        ${params.ilp_solver ? "--solver ${params.ilp_solver}" : ""}
+    """
+}
+
 process REMOVE_REDUNDANT {
     tag "${meta.id}"
 

@@ -1,4 +1,4 @@
-include { SORT_PPIS; SOLVE_ILP; SPLIT_RANDOM; CDHIT2D; REMOVE_REDUNDANT } from '../processes/splitting'
+include { SORT_PPIS; SOLVE_ILP; SPLIT_RANDOM; CDHIT2D; REMOVE_REDUNDANT; SELECT_EXAMPLES } from '../processes/splitting'
 
 // Assigns PPIs to train/val/test (KaHIP, ILP, or random shuffle, per
 // meta.split_method), then runs CD-HIT-2D redundancy removal for the two
@@ -10,6 +10,7 @@ workflow SPLIT_POSITIVES {
     partition_ch     // tuple(meta, partition)
     node_mapping_ch  // tuple(meta, node_mapping)
     instances_ch     // tuple(meta, instances_or_[]) -- [] in PPI mode
+    candidate_network_ch  // tuple(meta, candidate_network_or_[]) -- DDI mode's SELECT_EXAMPLES only
 
     main:
     // instances.tsv reconciles the three id vocabularies DDI mode splits across:
@@ -41,7 +42,7 @@ workflow SPLIT_POSITIVES {
     homology_train_fasta = ilp_out.train_fasta.mix(kahip_out.train_fasta)
     homology_val_fasta   = ilp_out.val_fasta.mix(kahip_out.val_fasta)
     homology_test_fasta  = ilp_out.test_fasta.mix(kahip_out.test_fasta)
-    sorted_mqc = ilp_out.mqc.mix(kahip_out.mqc).mix(random_out.mqc)
+    splitter_mqc = ilp_out.mqc.mix(kahip_out.mqc).mix(random_out.mqc)
 
     // One channel, one process: each (meta, label, fasta1, fasta2) item
     // becomes its own task, so Nextflow runs both CD-HIT-2D comparisons
@@ -70,13 +71,67 @@ workflow SPLIT_POSITIVES {
 
     nr = REMOVE_REDUNDANT(nr_inputs)
 
+    // The final per-split family CSVs and instance FASTAs, whichever path produced them.
+    fam_train   = nr.train_ppis.mix(random_out.train_ppis)
+    fam_val     = nr.val_ppis.mix(random_out.val_ppis)
+    fam_test    = nr.test_ppis.mix(random_out.test_ppis)
+    fasta_train = nr.train_fasta.mix(random_out.train_fasta)
+    fasta_val   = nr.val_fasta.mix(random_out.val_fasta)
+    fasta_test  = nr.test_fasta.mix(random_out.test_fasta)
+
+    // DDI mode's last splitting step: family pairs become domain-instance pairs
+    // and each parent protein is claimed by at most one split (Barrier B). It runs
+    // over all three splits jointly -- the claim table spans them -- so it is one
+    // task per dataset rather than the per-split fan-out used elsewhere.
+    if (params.ddi_mode) {
+        sel_inputs = fam_train.join(fam_val).join(fam_test)
+            .join(fasta_train).join(fasta_val).join(fasta_test)
+            .join(instances_ch).join(candidate_network_ch)
+
+        sel = SELECT_EXAMPLES(sel_inputs, gurobi_license_ch)
+
+        // SELECT_EXAMPLES drops DDIs that reached zero examples, so the family
+        // CSVs the negative sampler sees are its filtered ones, not REMOVE_REDUNDANT's.
+        out_train_ppis = sel.train_ppis
+        out_val_ppis   = sel.val_ppis
+        out_test_ppis  = sel.test_ppis
+        examples       = sel.train_examples.map { meta, f -> tuple(meta, "train", f) }
+            .mix(sel.val_examples.map  { meta, f -> tuple(meta, "val", f) })
+            .mix(sel.test_examples.map { meta, f -> tuple(meta, "test", f) })
+        universes      = sel.train_universe.map { meta, f -> tuple(meta, "train", f) }
+            .mix(sel.val_universe.map  { meta, f -> tuple(meta, "val", f) })
+            .mix(sel.test_universe.map { meta, f -> tuple(meta, "test", f) })
+        cand_examples  = sel.train_candidates.map { meta, f -> tuple(meta, "train", f) }
+            .mix(sel.val_candidates.map  { meta, f -> tuple(meta, "val", f) })
+            .mix(sel.test_candidates.map { meta, f -> tuple(meta, "test", f) })
+        unclaimed      = sel.unclaimed
+        // Mixed into sorted_mqc rather than threaded through QC as a 17th take:
+        // QC only collects that channel for MULTIQC, and both are splitting-stage
+        // diagnostics.
+        sorted_mqc     = splitter_mqc.mix(sel.mqc)
+    } else {
+        out_train_ppis = fam_train
+        out_val_ppis   = fam_val
+        out_test_ppis  = fam_test
+        examples       = channel.empty()
+        universes      = channel.empty()
+        cand_examples  = channel.empty()
+        unclaimed      = channel.empty()
+        sorted_mqc     = splitter_mqc
+    }
+
     emit:
-    train_ppis  = nr.train_ppis.mix(random_out.train_ppis)
-    val_ppis    = nr.val_ppis.mix(random_out.val_ppis)
-    test_ppis   = nr.test_ppis.mix(random_out.test_ppis)
-    train_fasta = nr.train_fasta.mix(random_out.train_fasta)
-    val_fasta   = nr.val_fasta.mix(random_out.val_fasta)
-    test_fasta  = nr.test_fasta.mix(random_out.test_fasta)
-    sorted_mqc  = sorted_mqc
-    nr_mqc      = nr.mqc
+    train_ppis    = out_train_ppis
+    val_ppis      = out_val_ppis
+    test_ppis     = out_test_ppis
+    train_fasta   = fasta_train
+    val_fasta     = fasta_val
+    test_fasta    = fasta_test
+    // DDI mode only; empty in PPI mode. tuple(meta, split_label, path).
+    examples      = examples
+    universes     = universes
+    cand_examples = cand_examples
+    unclaimed     = unclaimed
+    sorted_mqc    = sorted_mqc
+    nr_mqc        = nr.mqc
 }
