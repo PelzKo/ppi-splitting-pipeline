@@ -8,6 +8,7 @@ workflow CLUSTERING {
     sequences_ch      // tuple(meta, fasta)
     lengths_ch        // tuple(meta, lengths)
     blast_results_ch  // tuple(meta, blast_results_or_[])
+    instances_ch      // tuple(meta, instances_or_[]) -- [] in PPI mode
 
     main:
     branched = sequences_ch.join(blast_results_ch).branch { meta, fasta, blast_results ->
@@ -19,7 +20,10 @@ workflow CLUSTERING {
 
     blast_out = RUN_BLAST(branched.needs_blast).mix(branched.precomputed)
 
-    metis_out = MAKE_METIS(blast_out.join(lengths_ch))
+    // In DDI mode instances.tsv contracts the graph to one node per Pfam clan.
+    // Both DATA_PREP and DATA_PREP_DDI emit `instances` for every dataset ([] in
+    // PPI mode), so this join can never drop one.
+    metis_out = MAKE_METIS(blast_out.join(lengths_ch).join(instances_ch))
 
     // The ILP splitter clusters proteins into many small KaHIP partitions
     // first, whereas the default splitter partitions straight into train/val/test.

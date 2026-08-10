@@ -26,20 +26,25 @@ process MAKE_METIS {
     tag "${meta.id}"
 
     input:
-    tuple val(meta), path(blast_results), path(lengths)
+    // instances is declared LAST because CLUSTERING appends it with a join();
+    // the tuple is positional and unchecked, so a different order would stage
+    // lengths into the instances slot without any error.
+    tuple val(meta), path(blast_results), path(lengths), path(instances)
 
     output:
     tuple val(meta), path("similarity.graph"), emit: graph
     tuple val(meta), path("node_mapping.tsv"), emit: node_mapping
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     make_metis.py \\
         ${blast_results} \\
         ${lengths} \\
         similarity.graph \\
         node_mapping.tsv \\
-        --edge_weight ${meta.edge_weight}
+        --edge_weight ${meta.edge_weight} \\
+        ${inst_arg}
     """
 }
 

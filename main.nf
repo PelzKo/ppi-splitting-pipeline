@@ -119,7 +119,8 @@ workflow {
     } else {
         clustered = CLUSTERING(
             data.sequences, data.lengths,
-            datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, blast_results) }
+            datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, blast_results) },
+            data.instances
         )
         partition_ch    = clustered.partition
         node_mapping_ch = clustered.node_mapping
