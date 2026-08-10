@@ -279,6 +279,25 @@ def main():
         file=sys.stderr,
     )
 
+    # Constraint 1 puts every cluster in exactly one split and constraint 3 gives
+    # every split with a non-zero fraction a positive lower bound, so with fewer
+    # clusters than active splits at least one split is forced empty and the model
+    # is infeasible before the solver ever sees it. Say so here rather than letting
+    # the run spend its retry budget rediscovering it as "infeasible_or_unbounded".
+    active_names = [n for n, frac in zip(names, splits) if frac > 0]
+    if n_clusters < len(active_names):
+        print(
+            f"Infeasible by construction: {n_clusters} cluster(s) cannot fill "
+            f"{len(active_names)} non-empty split(s) ({', '.join(active_names)}) -- each cluster "
+            f"goes to exactly one split, so at least one would end up empty while the "
+            f"epsilon constraint demands it hold a positive share of the interactions. "
+            f"Raise ilp_kahip_k to cut the graph into more blocks (capped by its node count, "
+            f"which is the number of distinct clans in DDI mode), set a split's fraction to 0, "
+            f"or -- most likely with a count this small -- use a larger input.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print("Building problem matrices …", file=sys.stderr)
     cross_ppi, intra_ppi = build_matrices(clusters_list, protein_to_cluster, ppi_rows)
     n_loss_pairs = int(np.sum(cross_ppi > 0))
