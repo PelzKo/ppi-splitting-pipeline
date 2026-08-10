@@ -102,6 +102,38 @@ def instances_by_family(rows):
     return members
 
 
+def expand_members(groups, members):
+    """Map group ids to the union of their members; identity when `members` is falsy.
+
+    The split CSVs and the split FASTAs speak two different vocabularies in DDI
+    mode: the CSV's protein1/protein2 hold Pfam *families* while the FASTA is
+    keyed by domain *instance*. write_fasta() skips ids it does not know
+    silently, so handing it families produces three empty FASTAs and no
+    warning -- this is the conversion that prevents it. In PPI mode `members`
+    is None, the two vocabularies coincide and this is a plain copy.
+    """
+    if not members:
+        return set(groups)
+    return {m for g in groups for m in members.get(g, ())}
+
+
+def strict_survivors(present, keep, members):
+    """Groups all of whose PRESENT members survived; identity when `members` is falsy.
+
+    `present` are the sequence ids in one split's FASTA and `keep` the subset
+    CD-HIT-2D reported as non-redundant, so in PPI mode this is exactly the
+    `present & keep` the redundancy filter has always applied. In DDI mode a
+    family is kept only if every instance of it that reached this split
+    survived: STRICT rather than a majority vote, which is what keeps the CSV
+    and the FASTA consistent for free -- a kept family has no lost instance, so
+    expand_members() can never reintroduce a sequence CD-HIT flagged.
+    """
+    if not members:
+        return present & keep
+    lost = present - keep
+    return {g for g, ms in members.items() if (ms & present) and not (ms & lost)}
+
+
 # ---------------------------------------------------------------------------
 # KaHIP partition I/O
 # ---------------------------------------------------------------------------

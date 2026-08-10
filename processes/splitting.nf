@@ -2,7 +2,11 @@ process SORT_PPIS {
     tag "${meta.id}"
 
     input:
-    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping)
+    // instances is DDI mode's family/clan/instance table, [] in PPI mode. It is
+    // declared LAST because the channel appends it with .join() -- Nextflow
+    // matches tuple elements positionally and never checks, so a slot out of
+    // order silently stages the wrong file.
+    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping), path(instances)
 
     output:
     tuple val(meta), path("train.csv"),   emit: train_ppis
@@ -14,12 +18,14 @@ process SORT_PPIS {
     tuple val(meta), path("*_mqc.tsv"),   emit: mqc, optional: true
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     sort_ppis.py \\
         --ppis         ${ppis} \\
         --partition    ${partition} \\
         --fasta        ${fasta} \\
-        --node_mapping ${node_mapping}
+        --node_mapping ${node_mapping} \\
+        ${inst_arg}
     """
 }
 
@@ -31,7 +37,7 @@ process SPLIT_RANDOM {
     tag "${meta.id}"
 
     input:
-    tuple val(meta), path(ppis), path(fasta)
+    tuple val(meta), path(ppis), path(fasta), path(instances)  // instances last; [] in PPI mode
 
     output:
     tuple val(meta), path("train.csv"),   emit: train_ppis
@@ -43,6 +49,7 @@ process SPLIT_RANDOM {
     tuple val(meta), path("*_mqc.tsv"),   emit: mqc
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     sort_ppis_random.py \\
         --ppis        ${ppis} \\
@@ -51,7 +58,8 @@ process SPLIT_RANDOM {
         --val-split   ${meta.val_split} \\
         --test-split  ${meta.test_split} \\
         --seed        ${params.seed} \\
-        --id          ${meta.id}
+        --id          ${meta.id} \\
+        ${inst_arg}
     """
 }
 
@@ -91,7 +99,7 @@ process SOLVE_ILP {
     label 'gurobi'
 
     input:
-    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping)
+    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping), path(instances)  // instances last
     path gurobi_license
 
     output:
@@ -105,6 +113,7 @@ process SOLVE_ILP {
 
     script:
     def license_export = gurobi_license ? "export GRB_LICENSE_FILE=\$PWD/${gurobi_license}" : ""
+    def inst_arg       = instances ? "--instances ${instances}" : ''
     """
     ${license_export}
     solve_ilp.py \\
@@ -112,6 +121,7 @@ process SOLVE_ILP {
         --fasta         ${fasta} \\
         --partition     ${partition} \\
         --node_mapping  ${node_mapping} \\
+        ${inst_arg} \\
         --train-split ${meta.train_split} \\
         --val-split   ${meta.val_split} \\
         --test-split  ${meta.test_split} \\
@@ -131,7 +141,8 @@ process REMOVE_REDUNDANT {
           path(train_ppis), path(val_ppis), path(test_ppis),
           path(train_fasta), path(val_fasta), path(test_fasta),
           path(sim_train_val,  stageAs: 'sim_train_val.out'),
-          path(sim_train_test, stageAs: 'sim_train_test.out')
+          path(sim_train_test, stageAs: 'sim_train_test.out'),
+          path(instances)  // DDI mode's instances.tsv, [] in PPI mode -- LAST, matching the .join() order
 
     output:
     tuple val(meta), path("train_nr.csv"),   emit: train_ppis
@@ -143,6 +154,7 @@ process REMOVE_REDUNDANT {
     tuple val(meta), path("*_mqc.tsv"),      emit: mqc
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     remove_redundant.py \\
         --ppis           ${orig_ppis} \\
@@ -154,6 +166,7 @@ process REMOVE_REDUNDANT {
         --test_fasta     ${test_fasta} \\
         --sim_train_val  ${sim_train_val} \\
         --sim_train_test ${sim_train_test} \\
-        --id             ${meta.id}
+        --id             ${meta.id} \\
+        ${inst_arg}
     """
 }

@@ -9,12 +9,17 @@ workflow SPLIT_POSITIVES {
     sequences_ch     // tuple(meta, fasta)
     partition_ch     // tuple(meta, partition)
     node_mapping_ch  // tuple(meta, node_mapping)
+    instances_ch     // tuple(meta, instances_or_[]) -- [] in PPI mode
 
     main:
-    joined = ppis_ch.join(sequences_ch).join(partition_ch).join(node_mapping_ch)
-    // tuple(meta, ppis, fasta, partition, node_mapping)
+    // instances.tsv reconciles the three id vocabularies DDI mode splits across:
+    // the interaction file's Pfam families, the partition's clans and the FASTA's
+    // domain instances. Every dataset carries an item (DATA_PREP emits []), so
+    // these joins can never drop one.
+    joined = ppis_ch.join(sequences_ch).join(partition_ch).join(node_mapping_ch).join(instances_ch)
+    // tuple(meta, ppis, fasta, partition, node_mapping, instances)
 
-    branched = joined.branch { meta, ppis, fasta, partition, node_mapping ->
+    branched = joined.branch { meta, ppis, fasta, partition, node_mapping, instances ->
         ilp:    meta.split_method == "ilp"
         random: meta.split_method == "random"
         kahip:  true
@@ -26,7 +31,7 @@ workflow SPLIT_POSITIVES {
 
     ilp_out    = SOLVE_ILP(branched.ilp, gurobi_license_ch)
     kahip_out  = SORT_PPIS(branched.kahip)
-    random_out = SPLIT_RANDOM(branched.random.map { meta, ppis, fasta, partition, node_mapping -> tuple(meta, ppis, fasta) })
+    random_out = SPLIT_RANDOM(branched.random.map { meta, ppis, fasta, partition, node_mapping, instances -> tuple(meta, ppis, fasta, instances) })
 
     // ilp/kahip go through CD-HIT redundancy removal below; random doesn't
     // -- it feeds straight into the final emit channels further down.
@@ -56,9 +61,12 @@ workflow SPLIT_POSITIVES {
 
     // ppis_ch (pre-split) is threaded in so REMOVE_REDUNDANT can compute the
     // KaHIP/ILP discard count itself for the PPI Partitioning chart.
+    // instances is appended LAST here, which is the order REMOVE_REDUNDANT's
+    // input block has to declare -- the tuple is positional and unchecked, so
+    // an element out of place stages sim_train_test.out as the instance table.
     nr_inputs = ppis_ch.join(homology_train_ppis).join(homology_val_ppis).join(homology_test_ppis)
         .join(homology_train_fasta).join(homology_val_fasta).join(homology_test_fasta)
-        .join(sim_tv).join(sim_tt)
+        .join(sim_tv).join(sim_tt).join(instances_ch)
 
     nr = REMOVE_REDUNDANT(nr_inputs)
 

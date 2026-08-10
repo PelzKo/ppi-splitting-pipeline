@@ -126,7 +126,7 @@ workflow {
         node_mapping_ch = clustered.node_mapping
     }
 
-    split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch)
+    split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch, data.instances)
 
     neg = SAMPLE_NEGATIVES(
         split.train_ppis, split.val_ppis, split.test_ppis,
