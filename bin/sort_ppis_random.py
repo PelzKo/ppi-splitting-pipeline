@@ -75,7 +75,7 @@ def main():
         split_results.append({"name": name, "n_ppis": len(rows), "n_proteins": len(proteins)})
 
     # Random splitting never discards a PPI, by construction.
-    write_mqc(split_results, args.id, n_ppis_discarded=0)
+    write_mqc(split_results, args.id, n_ppis_discarded=0, ddi=bool(members))
 
 
 if __name__ == "__main__":

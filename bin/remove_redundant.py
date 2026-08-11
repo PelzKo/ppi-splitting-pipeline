@@ -46,28 +46,34 @@ def filter_ppis(rows, keep):
     return [row for row in rows if row["protein1"] in keep and row["protein2"] in keep]
 
 
-def write_mqc(split_results, id_, n_ppis_discarded):
+def write_mqc(split_results, id_, n_ppis_discarded, ddi=False):
     """The sole contributor to the per-dataset "split_bar_{id_}" PPI
     Partitioning bar chart for kahip/ilp datasets (sort_ppis.py/solve_ilp.py
     contribute nothing themselves -- see their modules): train/val/test show
     their final (post-CD-HIT) Kept size, and the single "discarded" bar is
     stacked by discard reason -- cross-partition (KaHIP/ILP, computed here
     from the original pre-split ppis.csv) vs CD-HIT-2D redundancy removal
-    (summed across val+test)."""
+    (summed across val+test).
+
+    `ddi` only relabels -- the rows are Pfam family pairs rather than PPIs in
+    DDI mode. The counts and the `id` are the same either way, and
+    ddi_attrition.py reduces this bar plus SELECT_EXAMPLES' into the run's
+    attrition waterfall by matching these column headers."""
     total_cdhit_removed = sum(r["n_ppis_removed"] for r in split_results)
+    noun = "DDI" if ddi else "PPI"
 
     with open("remove_redundant_bar_mqc.tsv", "w") as fh:
         fh.write(
             f"# id: 'split_bar_{id_}'\n"
-            f"# section_name: 'PPI Partitioning: {id_}'\n"
-            "# description: 'PPI counts per split. The discarded bar is coloured by why "
-            "a PPI never made it into a split: cross-partition (KaHIP/ILP) or removed by "
+            f"# section_name: '{noun} Partitioning: {id_}'\n"
+            f"# description: '{noun} counts per split. The discarded bar is coloured by why "
+            f"a {noun} never made it into a split: cross-partition (KaHIP/ILP) or removed by "
             "CD-HIT-2D redundancy filtering.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             f"#     id: 'split_bar_plot_{id_}'\n"
-            f"#     title: 'PPI Partitioning: edges per split ({id_})'\n"
-            "#     ylab: '# PPIs'\n"
+            f"#     title: '{noun} Partitioning: edges per split ({id_})'\n"
+            f"#     ylab: '# {noun}s'\n"
             "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)\n"
         )
         for r in split_results:
@@ -169,6 +175,7 @@ def main():
         ],
         args.id,
         n_ppis_discarded,
+        ddi=bool(members),
     )
 
 

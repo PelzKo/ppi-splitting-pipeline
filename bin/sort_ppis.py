@@ -28,26 +28,33 @@ from utils import (
 )
 
 
-def write_mqc(split_results, id_, n_ppis_discarded):
+def write_mqc(split_results, id_, n_ppis_discarded, ddi=False):
     """Write the PPI-Partitioning-bar MultiQC contribution for a dataset whose
     split assignment is NOT followed by CD-HIT redundancy removal -- i.e.
     only ever called from sort_ppis_random.py (split_method=random), where
     n_ppis_discarded is trivially 0 (random never discards a PPI). For
     kahip/ilp, REMOVE_REDUNDANT is the sole contributor to this same
     per-dataset "split_bar_{id_}" id instead, since it alone knows the
-    post-CD-HIT counts needed for the "Discarded (CD-HIT-2D)" series."""
+    post-CD-HIT counts needed for the "Discarded (CD-HIT-2D)" series.
+
+    `ddi` only relabels: the rows are Pfam family pairs rather than PPIs in DDI
+    mode, so calling them PPIs in the report would misread by a factor of the
+    example count. The `id` stays the same either way -- ddi_attrition.py finds
+    this bar by its column headers, and params.ddi_mode is run-wide, so a single
+    report never mixes the two."""
+    noun = "DDI" if ddi else "PPI"
     with open("sort_ppis_bar_mqc.tsv", "w") as fh:
         fh.write(
             f"# id: 'split_bar_{id_}'\n"
-            f"# section_name: 'PPI Partitioning: {id_}'\n"
-            "# description: 'PPI counts per split. The discarded bar is coloured by why "
-            "a PPI never made it into a split: cross-partition (KaHIP/ILP) or removed by "
+            f"# section_name: '{noun} Partitioning: {id_}'\n"
+            f"# description: '{noun} counts per split. The discarded bar is coloured by why "
+            f"a {noun} never made it into a split: cross-partition (KaHIP/ILP) or removed by "
             "CD-HIT-2D redundancy filtering.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             f"#     id: 'split_bar_plot_{id_}'\n"
-            f"#     title: 'PPI Partitioning: edges per split ({id_})'\n"
-            "#     ylab: '# PPIs'\n"
+            f"#     title: '{noun} Partitioning: edges per split ({id_})'\n"
+            f"#     ylab: '# {noun}s'\n"
             "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)\n"
         )
         for r in split_results:

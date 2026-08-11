@@ -41,6 +41,25 @@ process COLLECT_BIAS {
     """
 }
 
+// DDI mode only. Reduces one dataset's splitting-stage MultiQC bars into a
+// single attrition waterfall; it picks the two bars it needs out of whatever it
+// is handed by their column headers, so it neither depends on a filename nor
+// needs the upstream scripts to emit anything extra.
+process DDI_ATTRITION {
+    tag "${id}_ddi_attrition"
+
+    input:
+    tuple val(id), path(tsvs)
+
+    output:
+    tuple val(id), path("ddi_attrition_mqc.tsv"), emit: mqc
+
+    script:
+    """
+    ddi_attrition.py ${tsvs} --id ${id}
+    """
+}
+
 process SIMILARITY_HEATMAP {
     publishDir(path: { "${params.outdir}/${id}/multiqc" }, mode: 'copy')
     tag "${id}_heatmap"

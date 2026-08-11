@@ -103,6 +103,21 @@ def instances_by_family(rows):
     return members
 
 
+def instance_parent(instance_id):
+    """Parent protein accession of a domain instance id, or the id itself if it does not parse.
+
+    bin/fetch_domains.py builds instance ids as f"{family}_{protein}_{start}_{end}"
+    -- underscore-separated rather than pipe-separated on purpose, since a "|"
+    would be parsed as an NCBI defline by `makeblastdb -parse_seqids` and then
+    undone by the split("|") in make_metis.py. Neither a Pfam accession nor a
+    UniProt accession contains an underscore, so a right-anchored split recovers
+    all four fields. This is the only place that parse lives; every consumer that
+    has the instances.tsv to hand should read its protein_id column instead.
+    """
+    parts = instance_id.rsplit("_", 3)
+    return parts[1] if len(parts) == 4 else instance_id
+
+
 def pair_candidates(fam1, fam2, members, available):
     """Every instance pair that could represent the interaction (fam1, fam2).
 

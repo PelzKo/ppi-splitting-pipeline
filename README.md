@@ -122,12 +122,24 @@ Attributes analyzed:
 | `self_interactions`               | 1 if both proteins are identical, 0 otherwise                                                                                                                                                                                                                                                                                                        |
 | `same_species`                    | 1 if both proteins share the same NCBI taxon ID, 0 otherwise (only included if the dataset contains proteins from more than one species)                                                                                                                                                                                                             |
 | `topology_shortcut`               | Each endpoint's training positive-rate (pos / (pos + neg) training degree), using whichever endpoint(s) occurred in training; only included if at least one val/test/test_balanced/test_realistic pair has an endpoint that occurred in training — see [Naive baseline: the topology shortcut](#naive-baseline-the-topology-shortcut-optional) below |
+| `parent_degree`                   | DDI mode only. Mean number of times each of the pair's two parent proteins is reused within the same split. Positives and negatives are both drawn as pure co-occurrence over the same per-split protein universe, so this should carry no label information — a nonzero NMI means one class reuses its parents more than the other                    |
+
+In DDI mode the list changes: the three `functional_relatedness_*` attributes are dropped
+(Pfam families carry no GO annotations) and `parent_degree` is added.
+`sequence_similarity`, `embedding_similarity` and `same_species` are unchanged and act on the
+two domain instances the row holds, while `self_interactions` and `topology_shortcut` act one
+level up on the *node* pair — the Pfam family pair, read from the labelled CSV's own
+`family1`/`family2` columns. So `self_interactions` means "self-DDI" there (including a pair
+of two different instances of the same family) and `topology_shortcut` means family degree in
+the DDI graph rather than protein degree.
 
 **COLLECT_BIAS** — Aggregates all per-attribute TSVs into a single interactive Plotly scatter plot (NMI vs detectability, colored by attribute, shaped by split).
 
 **SIMILARITY_HEATMAP** — Plots a heatmap of pairwise BLASTp similarity between proteins in different splits, to visualize the degree of leakage.
 
-**MULTIQC** — Collects every dataset's `*_mqc.tsv`/`*_mqc.html` files into one combined report for the whole run (`results/multiqc/`). Per-attribute bias tables are excluded (the bias-scatter plot supersedes them); General Statistics, Classifier Performance, and Positive vs Negative Pairs are merged across datasets (qualified sample names + an `ID` column); PPI Partitioning, the similarity heatmap, and the bias-scatter plot remain one separate panel per dataset.
+**DDI_ATTRITION** — DDI mode only. One stacked bar per dataset accounting for every input DDI: discarded cross-cluster by the partitioner, removed by CD-HIT-2D, dropped because no domain-instance example survived Barrier B, or kept. The counts are read back out of the DDI Partitioning and DDI Example Selection bars rather than re-derived, so the waterfall and the per-stage charts cannot disagree.
+
+**MULTIQC** — Collects every dataset's `*_mqc.tsv`/`*_mqc.html` files into one combined report for the whole run (`results/multiqc/`). Per-attribute bias tables are excluded (the bias-scatter plot supersedes them); General Statistics, Classifier Performance, Positive vs Negative Pairs, and (in DDI mode) DDI Instance Expansion and DDI Attrition are merged across datasets (qualified sample names + an `ID` column); PPI/DDI Partitioning, DDI Example Selection, the similarity heatmap, and the bias-scatter plot remain one separate panel per dataset.
 
 ---
 
