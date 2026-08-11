@@ -221,6 +221,31 @@ def read_labelled_csv(path):
     return pairs, np.array(labels)
 
 
+def read_family_pairs(path):
+    """Per-row order-independent family pair, or None if the CSV has no family columns.
+
+    DDI mode's labelled CSVs (EXPAND_NEGATIVES' output) are domain-*instance*
+    pairs carrying the family pair they represent in family1/family2, so several
+    rows belong to one DDI. read_labelled_csv() drops those columns, and this is
+    what lets a caller aggregate its per-row predictions back to DDI level. Rows
+    come back in file order and neither reader dedupes, so the two line up
+    index for index.
+
+    None -- rather than an empty list -- distinguishes a PPI-mode CSV, which has
+    no DDI level at all, from a DDI-mode split that is simply empty.
+    """
+    with open(path) as fh:
+        reader = csv.DictReader(fh)
+        cols = reader.fieldnames or []
+        if "family1" not in cols or "family2" not in cols:
+            return None
+        pairs = []
+        for row in reader:
+            f1, f2 = row["family1"].strip(), row["family2"].strip()
+            pairs.append((min(f1, f2), max(f1, f2)))
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # Embeddings
 # ---------------------------------------------------------------------------
