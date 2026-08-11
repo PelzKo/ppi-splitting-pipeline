@@ -118,6 +118,9 @@ def instance_parent(instance_id):
     return parts[1] if len(parts) == 4 else instance_id
 
 
+EMPTY = frozenset()
+
+
 def pair_candidates(fam1, fam2, members, available):
     """Every instance pair that could represent the interaction (fam1, fam2).
 
@@ -136,10 +139,16 @@ def pair_candidates(fam1, fam2, members, available):
     EXPAND_NEGATIVES (sampled negatives), so both levels of DDI mode draw their
     instance pairs by exactly the same rule.
     """
-    la = sorted(members.get(fam1, ()) & available)
+    # The default has to be a set, not (): a family can reach a split CSV without
+    # ever appearing in instances.tsv -- a dead or mistyped Pfam accession that
+    # FETCH_DOMAIN_META could not resolve is the ordinary case, and the random
+    # splitter passes it straight through where solve_ilp/sort_ppis drop it for
+    # having no clan. Such a family simply has no candidates, which the caller
+    # already reports as a DDI dropped for want of an example.
+    la = sorted(members.get(fam1, EMPTY) & available)
     if fam1 == fam2:
         return [(a, b) for i, a in enumerate(la) for b in la[i:]]
-    lb = sorted(members.get(fam2, ()) & available)
+    lb = sorted(members.get(fam2, EMPTY) & available)
     return [(a, b) for a in la for b in lb]
 
 
