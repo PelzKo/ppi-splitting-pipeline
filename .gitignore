@@ -2,7 +2,13 @@
 .nextflow*
 work/
 results/
-data/
+# data/ is ignored except for the committed smoke-test fixtures. Note this has
+# to be `data/*` rather than `data/`: git cannot re-include a file whose parent
+# directory is itself excluded, so a bare `data/` would make the negations below
+# silently do nothing.
+data/*
+!data/test_ppis.csv
+!data/test_ddis.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
