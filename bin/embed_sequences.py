@@ -95,7 +95,13 @@ def main():
     else:
         embeddings = embed_prot_t5(seqs)
 
-    np.savez("embeddings.npz", **embeddings)
+    # Sorted, so the archive is byte-reproducible. np.savez writes members in the
+    # order given and zeroes their timestamps, so the only thing that made two
+    # runs differ was insertion order -- which follows --fasta, and that comes
+    # from a groupTuple() whose order is task-completion order. Contents were
+    # always identical; this stops a no-regression `diff -r` on results/ from
+    # reporting the shared .npz as changed when nothing has.
+    np.savez("embeddings.npz", **{pid: embeddings[pid] for pid in sorted(embeddings)})
     print(f"Saved {len(embeddings)} embeddings to embeddings.npz", file=sys.stderr)
 
 

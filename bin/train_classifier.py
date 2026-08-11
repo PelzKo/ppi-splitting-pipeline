@@ -145,9 +145,14 @@ def write_family_mqc(results, id_):
             fh.write(
                 f"# id: '{table_id}'\n"
                 f"# section_name: 'Classifier Performance, DDI level ({name})'\n"
-                "# description: 'The same predictions as this split's example-level table, averaged over "
-                "each DDI's domain-instance examples and scored per Pfam family pair. Example level asks "
-                "whether an instance pair can be called, family level whether the interaction can.'\n"
+                # No apostrophes anywhere in this description: MultiQC parses these
+                # header lines as YAML, and an unescaped ' inside a single-quoted
+                # scalar ends it early -- which fails the whole MULTIQC task, not
+                # just this section.
+                "# description: 'The same predictions as the example-level table for this split, averaged "
+                "over the domain-instance examples of each DDI and scored per Pfam family pair. Example "
+                "level asks whether an instance pair can be called, family level whether the interaction "
+                "can.'\n"
                 "# plot_type: 'table'\n"
                 "# pconfig:\n"
                 f"#     id: '{table_id}_table'\n"

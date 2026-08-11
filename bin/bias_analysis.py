@@ -224,6 +224,19 @@ def topology_shortcut(node_pairs, train_degree_ratio):
     return np.array(A, dtype=np.float32)
 
 
+# sklearn's kNN mutual-information estimator ignores every sample whose class has
+# only one member (`_compute_mi_cd`: "Ignore points with unique labels"), so a
+# smaller class than this cannot contribute to the estimate at all.
+MIN_PER_CLASS = 2
+
+
+def smallest_class(y):
+    """Size of the least-populated label in y; 0 for an empty split."""
+    if y.size == 0:
+        return 0
+    return int(np.min(np.unique(y, return_counts=True)[1]))
+
+
 def _prepare_split(pairs, y, embeddings):
     """Return (X, filtered_pairs, filtered_y, mask) keeping only pairs with embeddings.
 
@@ -440,6 +453,22 @@ def main():
                 print(f"  {split}: 0 pairs qualify for topology_shortcut (no training overlap)", file=sys.stderr)
                 continue
 
+        # Every class needs MIN_PER_CLASS members for the MI estimate to describe
+        # the split it is reported against. Below that, sklearn drops the whole
+        # class -- and if that empties the array (a one-row split, or one pair of
+        # each label) it raises instead, failing the task. Checked here rather
+        # than beside the X.shape[0] guard above so the topology_shortcut filter,
+        # which drops rows of its own, is covered by the same test.
+        if smallest_class(y_f) < MIN_PER_CLASS:
+            counts = ", ".join(f"{int(c)}x label {int(v)}" for v, c in zip(*np.unique(y_f, return_counts=True)))
+            print(
+                f"  {split}: {X.shape[0]} pairs but only {counts} -- fewer than {MIN_PER_CLASS} in a "
+                "class, so the mutual-information estimate would describe the other class alone; "
+                "skipping this split",
+                file=sys.stderr,
+            )
+            continue
+
         print(f"  {X.shape[0]} {split} pairs retained", file=sys.stderr)
         r = analyse(A, X, y_f, args.attribute, seed=args.seed)
         results.append((split, r))
@@ -455,6 +484,14 @@ def main():
         )
     elif results:
         write_mqc(args.attribute, results)
+    else:
+        # Reaching here means every split was skipped above. `optional: true` on
+        # the process output already tolerates the missing file, but say so, so a
+        # silently absent bias section is never mistaken for a measured zero.
+        print(
+            f"  {args.attribute}: no split had enough labelled pairs to analyse -- skipping output.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
