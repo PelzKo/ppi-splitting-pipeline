@@ -81,7 +81,7 @@ workflow QC {
 
     // One stacked bar per dataset accounting for every input DDI: discarded by
     // the partitioner, removed by CD-HIT-2D, dropped because no domain-instance
-    // example survived Barrier B, or kept. It reads the counts back out of the
+    // example was left for it, or kept. It reads the counts back out of the
     // splitting stage's own MultiQC bars rather than re-deriving them, so the
     // waterfall and the per-stage charts cannot disagree -- and neither
     // splitter nor SELECT_EXAMPLES needs new instrumentation.

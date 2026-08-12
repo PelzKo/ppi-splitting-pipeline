@@ -12,8 +12,8 @@ any strict dataset fails.
 
 What is checked, per dataset:
 
-  R1/R4  no Pfam family, and no clan, appears in more than one split
-  Barrier B  no parent protein is used by more than one split
+  families   no Pfam family, and no clan, appears in more than one split
+  parents    no parent protein is used by more than one split
   vocabulary every id in the *_instances.csv files is a real instance of the
              family that row declares, and its parent is in that split's own
              universe (or in the never-claimed reserve EXPAND_NEGATIVES may draw
@@ -25,10 +25,10 @@ What is checked, per dataset:
 
 split_method=random is the deliberate exception: it puts the same family in
 several splits so the naive baseline shows the leak, and SELECT_EXAMPLES gets
---no-barrier-b there. Datasets whose id matches --leaky-ids are checked the
+--allow-shared-parents there. Datasets whose id matches --leaky-ids are checked the
 other way round -- the leak-shaped invariants must FAIL, because a random
-baseline that came back clean would mean the barrier was applied where it
-should not have been. The vocabulary and cap checks still apply to them.
+baseline that came back clean would mean the one-split-per-parent rule was
+applied where it should not have been. The vocabulary and cap checks still apply to them.
 """
 
 import argparse
@@ -183,7 +183,7 @@ def check_dataset(dataset, path, instances_path, target, leaky):
 
     # The leak-shaped ones. Under split_method=random these are supposed to fail,
     # so the assertion flips rather than being skipped -- a random baseline that
-    # came back clean would mean the barrier was applied where it must not be.
+    # came back clean would mean the one-split-per-parent rule was applied where it must not be.
     shared = {}
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
         shared[("family", a, b)] = fam_by_split[a] & fam_by_split[b]
@@ -199,9 +199,9 @@ def check_dataset(dataset, path, instances_path, target, leaky):
         total = sum(len(v) for v in overlaps.values())
         detail = ", ".join(f"{a}/{b}: {len(v)}" for (_, a, b), v in sorted(overlaps.items()))
         name = {
-            "family": "R1/R4: no Pfam family in two splits",
-            "clan": "R1/R4: no clan in two splits",
-            "parent": "Barrier B: no parent protein in two splits",
+            "family": "no Pfam family in two splits",
+            "clan": "no clan in two splits",
+            "parent": "no parent protein in two splits",
             "universe": "protein universes pairwise disjoint",
         }[kind]
         if leaky:

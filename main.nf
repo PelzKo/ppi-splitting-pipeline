@@ -100,7 +100,8 @@ workflow {
 
     ppis_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, ppis) }
     // Read by both SPLIT_POSITIVES (DDI mode's SELECT_EXAMPLES, where the pairs'
-    // parent proteins join the Barrier B claim accounting) and SAMPLE_NEGATIVES.
+    // parent proteins join the same one-split-per-parent accounting as the
+    // positives) and SAMPLE_NEGATIVES.
     candidate_network_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, domain_instances, blast_results, candidate_network, partition, node_mapping -> tuple(meta, candidate_network) }
 
     // DDI mode swaps the whole data-prep front end: Pfam family accessions in

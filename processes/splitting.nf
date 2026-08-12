@@ -134,7 +134,7 @@ process SOLVE_ILP {
 
 // DDI mode only. The split CSVs above hold Pfam family pairs; this turns each
 // one into up to N domain-instance pairs and, in the same ILP, claims every
-// parent protein for at most one split (Barrier B). It re-emits the family CSVs
+// parent protein for at most one split. It re-emits the family CSVs
 // because a DDI whose every candidate was blocked ends up with zero examples and
 // is dropped from its split.
 process SELECT_EXAMPLES {
@@ -174,7 +174,7 @@ process SELECT_EXAMPLES {
     // split_method=random deliberately puts the same family in several splits so the
     // naive baseline shows the leak; claiming each parent for one split would repair
     // part of it, exactly like routing "random" through CD-HIT would.
-    def barrier_arg    = meta.split_method == "random" ? "--no-barrier-b" : ''
+    def shared_arg     = meta.split_method == "random" ? "--allow-shared-parents" : ''
     """
     ${license_export}
     select_examples.py \\
@@ -186,7 +186,7 @@ process SELECT_EXAMPLES {
         --test_fasta  ${test_fasta} \\
         --instances   ${instances} \\
         ${cand_arg} \\
-        ${barrier_arg} \\
+        ${shared_arg} \\
         --examples-target   ${params.ddi_examples_target} \\
         --shortlist-factor  ${params.ddi_shortlist_factor} \\
         --candidate-factor  ${params.ddi_candidate_factor} \\

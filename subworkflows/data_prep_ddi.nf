@@ -15,7 +15,7 @@ workflow DATA_PREP_DDI {
     datasets_ch  // tuple(meta, ddis, sequences, species, domain_instances)
 
     main:
-    // GO annotations are not part of this mode (R9: they describe proteins, not
+    // GO annotations are not part of this mode (they describe proteins, not
     // domain families), so unlike DATA_PREP's three-way gate the precomputed
     // hatch asks only for the files that cannot be derived.
     branched = datasets_ch.branch { meta, ddis, sequences, species, domain_instances ->

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-DDI mode: turn family-pair DDIs into domain-instance-pair examples (Barrier B).
+DDI mode: turn family-pair DDIs into domain-instance-pair examples, each parent
+protein used by at most one split.
 
 The split CSVs handed over by SOLVE_ILP/SORT_PPIS/SPLIT_RANDOM (and filtered by
 REMOVE_REDUNDANT) hold Pfam *family* pairs, but a row a classifier can train on
 is a pair of concrete domain *instances* -- and the parent proteins of those two
 instances must not turn up in another split, or the parent's other domains carry
-the interaction across the split boundary. That is Barrier B.
+the interaction across the split boundary.
 
-Selection and Barrier B are one problem, not two: claiming a parent protein for
-one split removes it from every other split's options, so which examples a split
-can still reach depends on what the other splits took. Greedy order would decide
-the outcome, so it is solved as an ILP over all three splits jointly.
+Selection and that one-split-per-parent rule are one problem, not two: claiming a
+parent protein for one split removes it from every other split's options, so which
+examples a split can still reach depends on what the other splits took. Greedy
+order would decide the outcome, so it is solved as an ILP over all three splits
+jointly.
 
 Two reductions keep that ILP small:
 
@@ -34,18 +36,19 @@ single weighted objective would need:
   2. then maximise the positive DDIs reaching the full N, then total positive
      examples, then example diversity (distinct parents),
   3. then the same for the candidate_network negatives, which ride in the same
-     claim accounting so their examples inherit Barrier B by construction --
-     but strictly below the positives, so a negative can never take a parent a
-     positive needed.
+     claim accounting so their examples inherit the one-split-per-parent rule by
+     construction -- but strictly below the positives, so a negative can never
+     take a parent a positive needed.
 
---no-barrier-b turns the whole claim mechanism off, which is what split_method=
-random needs: that path deliberately puts a node in more than one split so the
-naive baseline shows the leak, and enforcing Barrier B on top would repair part
-of it. Every unit is then decoupled and the ILP is skipped entirely.
+--allow-shared-parents turns the whole claim mechanism off, which is what
+split_method=random needs: that path deliberately puts a node in more than one
+split so the naive baseline shows the leak, and holding parents to one split each
+would repair part of it. Every unit is then decoupled and the ILP is skipped
+entirely.
 
 Note the caveat that follows from step 3: a candidate pair SAMPLE_NEGATIVES does
 not ultimately select will have claimed proteins for nothing, and purely random
-negatives stay outside this ILP altogether -- so Barrier B is exact for
+negatives stay outside this ILP altogether -- so the rule is exact for
 high-confidence negatives and holds via the per-split protein universe for the
 rest.
 """
@@ -163,7 +166,7 @@ def _run_stage(problem, label, solver, seed, secs, verbose):
 
 
 def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, verbose):
-    """Choose <= n examples per unit subject to Barrier B. Fills Unit.picked.
+    """Choose <= n examples per unit, one split per parent protein. Fills Unit.picked.
 
     Variables
         y[e]   in {0,1}  candidate example e is selected
@@ -173,10 +176,10 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
         o[d,p] >= 0      how often unit d reuses parent p beyond the first time
 
     Constraints
-        (1) sum_{e in d} y[e] <= min(n, |C_d|)          per-unit cap (R5: n is a cap)
+        (1) sum_{e in d} y[e] <= min(n, |C_d|)          per-unit cap (n is a cap, not a quota)
         (2) sum_{e in d} y[e] >= nz[d]
         (3) sum_{e in d} y[e] >= n * r[d]
-        (4) sum_s c[p,s] <= 1                           Barrier B
+        (4) sum_s c[p,s] <= 1                           one split per parent protein
         (5) y[e] <= c[parent(e), split(d(e))]           both parents, contested only
         (6) o[d,p] >= (uses of p by d's selected examples) - 1
     """
@@ -219,8 +222,10 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
             for idx in idxs:
                 rows.append(pi)
                 cols.append(idx)
-        barrier = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(len(by_prot), len(claim_index))).tocsr()
-        cons.append(barrier @ c <= np.ones(len(by_prot)))
+        one_split_per_parent = sp.coo_matrix(
+            (np.ones(len(rows)), (rows, cols)), shape=(len(by_prot), len(claim_index))
+        ).tocsr()
+        cons.append(one_split_per_parent @ c <= np.ones(len(by_prot)))
 
         e_idx, cl_idx = [], []
         for k, (ui, (a, b)) in enumerate(cand_index):
@@ -342,8 +347,8 @@ def write_mqc(stats, id_):
             f"# section_name: 'DDI Example Selection: {id_}'\n"
             "# description: 'Positive DDIs per split, coloured by how many domain-instance "
             "examples each one ended up with. A DDI that reached zero examples -- every "
-            "candidate blocked because Barrier B gave its parent proteins to another split, "
-            "or the family had no usable instance -- is dropped from the split.'\n"
+            "candidate blocked because another split already had its parent proteins, or the "
+            "family had no usable instance -- is dropped from the split.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             f"#     id: 'ddi_examples_bar_plot_{id_}'\n"
@@ -396,7 +401,8 @@ def main():
         "--candidate-network",
         default=None,
         help="high-confidence negative family pairs. Their parents claim proteins in the same ILP, "
-        "so their examples satisfy Barrier B too -- see this module's docstring for the caveat.",
+        "so their examples respect the one-split-per-parent rule too -- see this module's "
+        "docstring for the caveat.",
     )
     ap.add_argument("--examples-target", type=int, default=5, help="N: cap on examples per DDI (default 5)")
     ap.add_argument(
@@ -420,12 +426,12 @@ def main():
         "sum by at most 2, so 2*lambda < 1 is what keeps diversity from ever costing an example.",
     )
     ap.add_argument(
-        "--no-barrier-b",
+        "--allow-shared-parents",
         action="store_true",
         help="let a parent protein be claimed by several splits at once. For split_method=random, "
         "which deliberately puts the same node in more than one split so the baseline shows the "
-        "leak: enforcing Barrier B there would repair part of that leak and blunt the very "
-        "comparison the naive baseline exists to make.",
+        "leak: holding parents to one split each there would repair part of that leak and blunt "
+        "the very comparison the naive baseline exists to make.",
     )
     ap.add_argument("--max-sec", type=int, default=300, help="total ILP time budget in seconds (default 300)")
     ap.add_argument("--solver", default=None, help="CVXPY solver name, e.g. GUROBI, SCIP (default: auto)")
@@ -505,11 +511,11 @@ def main():
         for a, b in u.cands:
             splits_of[parent_of[a]].add(u.split)
             splits_of[parent_of[b]].add(u.split)
-    contested = set() if args.no_barrier_b else {p for p, ss in splits_of.items() if len(ss) > 1}
-    if args.no_barrier_b:
+    contested = set() if args.allow_shared_parents else {p for p, ss in splits_of.items() if len(ss) > 1}
+    if args.allow_shared_parents:
         print(
-            "--no-barrier-b: parent proteins may be claimed by several splits at once. Every unit "
-            "is therefore decoupled and the ILP is skipped.",
+            "--allow-shared-parents: parent proteins may be claimed by several splits at once. "
+            "Every unit is therefore decoupled and the ILP is skipped.",
             file=sys.stderr,
         )
     print(
@@ -545,7 +551,7 @@ def main():
             args.verbose,
         )
     else:
-        why = "--no-barrier-b" if args.no_barrier_b else "no contested parent protein"
+        why = "--allow-shared-parents" if args.allow_shared_parents else "no contested parent protein"
         print(f"ILP skipped ({why}): every unit's examples are decided locally.", file=sys.stderr)
 
     # The per-split protein universe: every uncontested parent in play for this
@@ -558,7 +564,7 @@ def main():
     for p, ss in splits_of.items():
         if p in contested:
             continue
-        # Exactly one split, unless --no-barrier-b let a parent stay in several.
+        # Exactly one split, unless --allow-shared-parents let a parent stay in several.
         for s in ss:
             universe[s].add(p)
     for u in units:
@@ -599,7 +605,7 @@ def main():
 
     # Parents no candidate ever reached. A contested parent the ILP left
     # unclaimed is deliberately in neither list -- handing it to a split now
-    # would reintroduce the leak Barrier B just prevented.
+    # would reintroduce the leak the one-split-per-parent rule just prevented.
     write_ids(all_parents - set(splits_of), "unclaimed.txt")
     print(
         f"{len(all_parents - set(splits_of)):,} parent proteins never in play "

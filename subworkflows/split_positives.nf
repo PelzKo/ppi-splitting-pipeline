@@ -80,7 +80,7 @@ workflow SPLIT_POSITIVES {
     fasta_test  = nr.test_fasta.mix(random_out.test_fasta)
 
     // DDI mode's last splitting step: family pairs become domain-instance pairs
-    // and each parent protein is claimed by at most one split (Barrier B). It runs
+    // and each parent protein is claimed by at most one split. It runs
     // over all three splits jointly -- the claim table spans them -- so it is one
     // task per dataset rather than the per-split fan-out used elsewhere.
     if (params.ddi_mode) {

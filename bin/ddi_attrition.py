@@ -13,9 +13,9 @@ charts from disagreeing:
                                 filtering            [remove_redundant.py]
     dropped (no example)        the DDI survived splitting but reached zero
                                 domain-instance examples -- every candidate pair
-                                blocked because Barrier B gave its parent
-                                proteins to another split, or the family had no
-                                usable instance      [select_examples.py]
+                                blocked because another split already had its
+                                parent proteins, or the family had no usable
+                                instance             [select_examples.py]
     kept                        made it into a split with >= 1 example
 
 The two source bars are identified by their column headers rather than their
@@ -135,9 +135,8 @@ def write_mqc(stats, id_):
             "cross-cluster means the partitioner put the two Pfam families in different "
             "clusters; discarded by CD-HIT-2D means a family lost an instance to redundancy "
             "filtering; dropped (no example) means the DDI survived splitting but reached zero "
-            "domain-instance examples, because Barrier B gave its parent proteins to another "
-            "split or the family had no usable instance. The four series sum to the input DDI "
-            "count.'\n"
+            "domain-instance examples, because another split already had its parent proteins or "
+            "the family had no usable instance. The four series sum to the input DDI count.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             "#     id: 'ddi_attrition_plot'\n"

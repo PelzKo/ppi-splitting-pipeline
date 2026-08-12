@@ -121,7 +121,7 @@ def self_interactions(node_pairs):
     Called with the *node* pair, so this is a self-interaction in PPI mode and a
     self-DDI (family1 == family2) in DDI mode -- which also catches a row whose
     two sides are different domain instances of the same family, the case an
-    instance-level comparison would miss. Self-DDIs are legal (R8) and stay in
+    instance-level comparison would miss. Self-DDIs are legal and stay in
     the pool, so this measures a real property rather than flagging bad input.
     """
     return np.array([1.0 if p1 == p2 else 0.0 for p1, p2 in node_pairs], dtype=np.float32)

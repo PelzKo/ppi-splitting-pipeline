@@ -565,7 +565,7 @@ def main():
 
     ids, species = build_species(by_family, taxa)
     write_species_tsv(species_out, ids, species)
-    # R9 drops the functional_relatedness attributes, not the --go_annotations
+    # DDI mode drops the functional_relatedness attributes, not the --go_annotations
     # argument, so every consumer that requires the flag still gets a valid file.
     write_go_tsv(go_out, [], {})
 

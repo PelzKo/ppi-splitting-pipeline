@@ -10,16 +10,17 @@ on: an embedding exists per domain *instance*, not per family. This script is
 the bridge.
 
 Positives need no drawing. SELECT_EXAMPLES already chose their instance pairs
-under Barrier B, so their expansion is a lookup keyed by family pair.
+with each parent protein held to one split, so their expansion is a lookup keyed
+by family pair.
 
 Negatives are drawn here, by the same rule the positives were:
 
   * candidate_network negatives that SELECT_EXAMPLES also saw reuse its
     pre-selected pairs verbatim -- those claimed parent proteins inside the same
-    ILP, so Barrier B holds for them exactly.
+    ILP, so one split per parent holds for them exactly.
   * every other negative family pair draws carriers from this split's protein
-    universe (the parents SELECT_EXAMPLES claimed for it), which is what makes
-    Barrier B hold heuristically for the randomly sampled ones: a parent in one
+    universe (the parents SELECT_EXAMPLES claimed for it), which is what keeps
+    one split per parent true for the randomly sampled ones: a parent in one
     split's universe is in no other's.
   * a pair whose universe-restricted pool cannot reach N is retried against the
     split's share of the proteins no candidate ever reached (unclaimed.txt).
@@ -34,8 +35,8 @@ lives with (curated positives vs sampled negatives) does not exist here.
 The one thing it does not do is rebalance. A negative pair restricted to its
 split's universe can end up with fewer than N examples while positives have N,
 so the example-level ratio can drift below the family-level one the sampler
-produced. Resampling to fix that would either discard Barrier-B-vetted
-positives or break the <= N cap, so instead both ratios are reported and a
+produced. Resampling to fix that would either discard positives the selection ILP
+already vetted or break the <= N cap, so instead both ratios are reported and a
 deviation over 10 % is warned about on stderr.
 """
 
@@ -100,8 +101,9 @@ def unclaimed_share(unclaimed, split, weights, seed):
     Every split's task runs this over the same unclaimed.txt with the same seed
     and keeps only its own share, so the partition is consistent across tasks
     without any of them seeing the others' choices -- which is what lets the
-    per-split fan-out extend a short pool without breaking Barrier B. Weighted
-    by the split fractions so the largest split gets the largest share.
+    per-split fan-out extend a short pool without ever giving one parent protein
+    to two splits. Weighted by the split fractions so the largest split gets the
+    largest share.
     """
     active = [s for s in SPLITS if weights.get(s, 0) > 0]
     if not active:
@@ -177,7 +179,7 @@ def write_mqc(label, st, id_):
             "# section_name: 'DDI Instance Expansion: Negative Pairs'\n"
             "# description: 'Sampled negative family pairs per split, by how many domain-instance "
             "examples each reached. A pair at zero had no instance of either family whose parent "
-            "protein belongs to this split -- Barrier B gave those parents to another split -- and is "
+            "protein belongs to this split -- another split already had those parents -- and is "
             "dropped from the labelled CSV.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
@@ -209,7 +211,7 @@ def main():
     ap.add_argument("--val-split", type=float, default=0.1)
     ap.add_argument("--test-split", type=float, default=0.1)
     ap.add_argument(
-        "--no-barrier-b",
+        "--allow-shared-parents",
         action="store_true",
         help="draw from the whole unclaimed pool rather than this split's share, matching "
         "SELECT_EXAMPLES under split_method=random, where overlapping universes are the point.",
@@ -244,7 +246,7 @@ def main():
     universe = read_ids(args.universe)
     unclaimed = read_ids(args.unclaimed)
     weights = {"train": args.train_split, "val": args.val_split, "test": args.test_split}
-    share = unclaimed if args.no_barrier_b else unclaimed_share(unclaimed, split, weights, args.seed)
+    share = unclaimed if args.allow_shared_parents else unclaimed_share(unclaimed, split, weights, args.seed)
 
     # Instances usable for a negative pair in this split: present in the split's
     # FASTA (an example with no sequence cannot be embedded) and parented by a

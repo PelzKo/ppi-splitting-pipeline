@@ -78,8 +78,8 @@ process SAMPLE_NEGATIVES_ILP {
 
 // DDI mode only. Both samplers above work at Pfam family level; this turns the
 // family pairs they labelled into the domain-instance pairs the classifier needs
-// -- positives by looking up SELECT_EXAMPLES' Barrier-B-vetted choices,
-// negatives by drawing carriers from that split's protein universe.
+// -- positives by looking up the pairs SELECT_EXAMPLES already vetted, negatives
+// by drawing carriers from that split's protein universe.
 process EXPAND_NEGATIVES {
     publishDir(path: { "${params.outdir}/${meta.id}" }, mode: 'copy', saveAs: { f -> f.endsWith('_mqc.tsv') ? null : f })
     tag "${meta.id}_${label}"
@@ -104,7 +104,7 @@ process EXPAND_NEGATIVES {
     // Matches the flag SELECT_EXAMPLES was given for this dataset: with
     // split_method=random the universes deliberately overlap, so the unclaimed
     // reserve is not partitioned between splits either.
-    def barrier_arg = meta.split_method == "random" ? "--no-barrier-b" : ''
+    def shared_arg = meta.split_method == "random" ? "--allow-shared-parents" : ''
     """
     expand_negatives.py \\
         --labelled           ${labelled} \\
@@ -120,7 +120,7 @@ process EXPAND_NEGATIVES {
         --train-split        ${meta.train_split} \\
         --val-split          ${meta.val_split} \\
         --test-split         ${meta.test_split} \\
-        ${barrier_arg} \\
+        ${shared_arg} \\
         --seed               ${params.seed} \\
         --id                 ${meta.id}
     """
