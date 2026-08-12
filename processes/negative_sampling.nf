@@ -93,34 +93,30 @@ process EXPAND_NEGATIVES {
     // the upstream task's cached output on -resume.
     tuple val(meta), val(split), val(label),
           path(labelled, stageAs: 'labelled_in.csv'),
-          path(examples), path(candidate_examples), path(universe), path(fasta),
-          path(unclaimed), path(instances)
+          path(examples), path(candidate_examples), path(universe), path(reserve), path(fasta),
+          path(instances)
 
     output:
     tuple val(meta), val(label), path("${label}_instances.csv"), emit: labelled
     tuple val(meta), path("${label}*_mqc.tsv"),                  emit: mqc
 
     script:
-    // Matches the flag SELECT_EXAMPLES was given for this dataset: with
-    // split_method=random the universes deliberately overlap, so the unclaimed
-    // reserve is not partitioned between splits either.
-    def shared_arg = meta.split_method == "random" ? "--allow-shared-parents" : ''
+    // No --allow-shared-parents here: the only thing this task did with it was
+    // decide how to slice the unclaimed pool, and SELECT_EXAMPLES now hands over
+    // a per-split reserve file with that decision already made (under
+    // split_method=random that file is the whole pool, in every split).
     """
     expand_negatives.py \\
         --labelled           ${labelled} \\
         --examples           ${examples} \\
         --candidate-examples ${candidate_examples} \\
         --universe           ${universe} \\
-        --unclaimed          ${unclaimed} \\
+        --reserve            ${reserve} \\
         --instances          ${instances} \\
         --fasta              ${fasta} \\
         --output             ${label}_instances.csv \\
         --split-name         ${label} \\
         --examples-target    ${params.ddi_examples_target} \\
-        --train-split        ${meta.train_split} \\
-        --val-split          ${meta.val_split} \\
-        --test-split         ${meta.test_split} \\
-        ${shared_arg} \\
         --seed               ${params.seed} \\
         --id                 ${meta.id}
     """

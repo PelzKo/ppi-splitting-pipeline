@@ -15,10 +15,23 @@ workflow DATA_PREP_DDI {
     datasets_ch  // tuple(meta, ddis, sequences, species, domain_instances)
 
     main:
+    // The precomputed hatch is all-or-nothing, so a row that supplies two of the
+    // three files would fall into needs_fetch, ignore both, and stream 6.3 GB
+    // from EBI -- a correct result by a route nobody asked for, hours later and
+    // silently. Fail loudly instead, wording it like main.nf's --split_only check.
+    checked_ch = datasets_ch.map { meta, ddis, sequences, species, domain_instances ->
+        def supplied = [sequences: sequences, species: species, domain_instances: domain_instances]
+        def missing  = supplied.findAll { k, v -> !v }.keySet()
+        if (missing && missing.size() < supplied.size()) {
+            error("--ddi_mode precomputed data prep needs sequences, species and domain_instances together (row '${meta.id}' supplies ${(supplied.keySet() - missing).join(', ')} but is missing ${missing.join(', ')}). Leave all three blank to fetch them from Pfam instead.")
+        }
+        tuple(meta, ddis, sequences, species, domain_instances)
+    }
+
     // GO annotations are not part of this mode (they describe proteins, not
     // domain families), so unlike DATA_PREP's three-way gate the precomputed
     // hatch asks only for the files that cannot be derived.
-    branched = datasets_ch.branch { meta, ddis, sequences, species, domain_instances ->
+    branched = checked_ch.branch { meta, ddis, sequences, species, domain_instances ->
         precomputed: sequences && species && domain_instances
             return tuple(meta, sequences, species, domain_instances)
         needs_fetch: true
@@ -38,14 +51,35 @@ workflow DATA_PREP_DDI {
         .unique()
         .collectFile(name: 'families.txt', newLine: true, sort: true)
 
-    // Pfam-A.clans.tsv is a release-wide reference file consumed by the one
-    // shared task, so it is a run-global param rather than a samplesheet column
-    // -- same idiom as gurobi_license in SPLIT_POSITIVES.
+    // Pfam-A.clans.tsv and Pfam-A.fasta.gz are release-wide reference files
+    // consumed by the one shared task, so they are run-global params rather than
+    // samplesheet columns -- same idiom as gurobi_license in SPLIT_POSITIVES.
+    // Both are staged as path inputs, which is what gets them checkIfExists and a
+    // place in the task hash, and what makes them work on any executor.
     clans_ch = params.pfam_clans
         ? channel.value(file(params.pfam_clans, checkIfExists: true))
         : channel.value([])
 
-    shared_fetch   = FETCH_DOMAIN_META(families_list.map { families -> tuple([id: "_shared"], families) }, clans_ch)
+    fasta_ch = params.pfam_fasta
+        ? channel.value(file(params.pfam_fasta, checkIfExists: true))
+        : channel.value([])
+
+    // The cache is the exception: FETCH_DOMAIN_META *writes* to it, so it cannot
+    // be staged, and a relative path would resolve inside the task's work dir and
+    // be deleted with it -- making the documented "--interpro_cache makes re-runs
+    // cheap" quietly untrue. Absolutised here. It must also be a filesystem every
+    // compute node shares; on node-local scratch each task gets its own cold cache.
+    cache_dir = params.interpro_cache ? file(params.interpro_cache).toAbsolutePath().toString() : ''
+    if (cache_dir && !file(cache_dir).exists()) {
+        log.warn "--interpro_cache ${cache_dir} does not exist yet; FETCH_DOMAIN_META will create it."
+    }
+
+    shared_fetch   = FETCH_DOMAIN_META(
+        families_list.map { families -> tuple([id: "_shared"], families) },
+        clans_ch,
+        fasta_ch,
+        channel.value(cache_dir),
+    )
     shared_lengths = GET_LENGTHS_SHARED_DDI(shared_fetch.sequences)
 
     subset_out = SUBSET_DOMAIN_DATA(

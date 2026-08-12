@@ -143,10 +143,10 @@ workflow {
         split.train_ppis, split.val_ppis, split.test_ppis,
         data.species, data.go_annotations,
         candidate_network_ch,
-        // DDI mode only (the first two are empty channels in PPI mode): the
-        // per-split example tables, protein universes and never-in-play proteins
+        // DDI mode only (both empty channels in PPI mode): the per-split example
+        // tables, protein universes and reserves of never-in-play proteins
         // EXPAND_NEGATIVES turns family pairs into instance pairs with.
-        split.ddi_files, split.unclaimed, data.instances
+        split.ddi_files, data.instances
     )
 
     // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +

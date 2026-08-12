@@ -345,6 +345,42 @@ def write_ids(ids, path):
             fh.write(f"{i}\n")
 
 
+def partition_reserve(unclaimed, weights, seed, allow_shared):
+    """Hand each never-in-play parent protein to exactly one split.
+
+    Partitioned here rather than in each EXPAND_NEGATIVES task because this is
+    the one place that knows all three splits: weighting the draw by the DDIs each
+    split actually kept is correct on every split method, where weighting it by
+    train_split/val_split/test_split was not -- split_method=kahip never reads
+    those fractions (sort_ppis.py ranks the KaHIP blocks and hands largest ->
+    train), so an 80/10/10 reserve could sit on top of a realised 50/30/20 split.
+
+    Doing it once also drops the requirement that four independent tasks reach the
+    same partition from the same file and seed. That was true, but it was a
+    property that could quietly stop being true.
+
+    Under --allow-shared-parents (split_method=random) every split gets the whole
+    pool, since overlapping universes are the point on that path.
+    """
+    if allow_shared:
+        return {s: set(unclaimed) for s in SPLITS}
+    out = {s: set() for s in SPLITS}
+    active = [s for s in SPLITS if weights.get(s, 0) > 0]
+    if not active:
+        return out
+    total = float(sum(weights[s] for s in active))
+    rng = random.Random(f"{seed}:reserve")
+    for p in sorted(unclaimed):
+        x = rng.random() * total
+        acc = 0.0
+        for s in active:
+            acc += weights[s]
+            if x < acc:
+                out[s].add(p)
+                break
+    return out
+
+
 def write_mqc(stats, id_):
     """Two MultiQC sections: the per-split DDI outcome bar and a stats table."""
     with open("select_examples_bar_mqc.tsv", "w") as fh:
@@ -609,14 +645,16 @@ def main():
             file=sys.stderr,
         )
 
-    # Parents no candidate ever reached. A contested parent the ILP left
-    # unclaimed is deliberately in neither list -- handing it to a split now
+    # Parents no candidate ever reached, published whole as a diagnostic and split
+    # three ways for the negative sampler. A contested parent the ILP left
+    # unclaimed is deliberately in neither -- handing it to a split now
     # would reintroduce the leak the one-split-per-parent rule just prevented.
     #
     # This reserve exists so a negative family pair whose own split universe
     # cannot reach N examples has somewhere else to draw from without breaking
     # one-split-per-parent: a parent here belongs to no split, so giving it to one
-    # takes it from none.
+    # takes it from none. Each reserve protein goes to exactly one split, weighted
+    # by the DDIs that split actually kept -- see partition_reserve().
     #
     # It is all but inert at --examples-pool-factor 1 (M = N). A reserve parent is
     # only usable downstream if one of its instances is also in the target split's
@@ -635,10 +673,15 @@ def main():
     # Treat its first factor >= 2 run as untested: watch the "Extended with
     # unclaimed" MQC column go non-zero and confirm check_ddi_invariants.py still
     # passes on that run.
-    write_ids(all_parents - set(splits_of), "unclaimed.txt")
+    unclaimed = all_parents - set(splits_of)
+    write_ids(unclaimed, "unclaimed.txt")
+    reserve = partition_reserve(unclaimed, {s: stats[s]["kept"] for s in SPLITS}, args.seed, args.allow_shared_parents)
+    for split in SPLITS:
+        write_ids(reserve[split], f"{split}_reserve.txt")
     print(
-        f"{len(all_parents - set(splits_of)):,} parent proteins never in play "
-        f"(free for the negative sampler to extend a split's universe with)",
+        f"{len(unclaimed):,} parent proteins never in play, split "
+        + ", ".join(f"{len(reserve[s]):,} {s}" for s in SPLITS)
+        + " (free for the negative sampler to extend a split's universe with)",
         file=sys.stderr,
     )
 

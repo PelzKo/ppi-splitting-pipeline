@@ -22,12 +22,12 @@ Negatives are drawn here, by the same rule the positives were:
     universe (the parents SELECT_EXAMPLES claimed for it), which is what keeps
     one split per parent true for the randomly sampled ones: a parent in one
     split's universe is in no other's.
-  * a pair whose universe-restricted pool cannot reach N is retried against the
-    split's share of the proteins no candidate ever reached (unclaimed.txt).
-    A parent in that reserve belongs to no split, so handing it to one takes it
-    from none. The share is computed identically in every split's task, from the
-    same file and seed, so the four tasks cannot hand the same protein to two
-    splits without talking to each other.
+  * a pair whose universe-restricted pool cannot reach N is retried against this
+    split's reserve of proteins no candidate ever reached
+    (SELECT_EXAMPLES' {split}_reserve.txt). A parent in that reserve belongs to no
+    split, so handing it to one takes it from none -- and SELECT_EXAMPLES, the one
+    task that sees all three splits, decides the partition, weighted by the DDIs
+    each split actually kept.
 
     This reserve path is all but inert at --examples-pool-factor 1 and becomes
     live above it -- see the long note beside write_ids(..., "unclaimed.txt") in
@@ -99,35 +99,6 @@ def examples_by_family_pair(path):
     for row in read_ppis(path):
         out[unordered(row["family1"], row["family2"])].append((row["protein1"], row["protein2"]))
     return out
-
-
-def unclaimed_share(unclaimed, split, weights, seed):
-    """Hand each never-in-play parent protein to exactly one split, deterministically.
-
-    Every split's task runs this over the same unclaimed.txt with the same seed
-    and keeps only its own share, so the partition is consistent across tasks
-    without any of them seeing the others' choices -- which is what lets the
-    per-split fan-out extend a short pool without ever giving one parent protein
-    to two splits. Weighted by the split fractions so the largest split gets the
-    largest share.
-    """
-    active = [s for s in SPLITS if weights.get(s, 0) > 0]
-    if not active:
-        return set()
-    total = float(sum(weights[s] for s in active))
-    mine = set()
-    for p in sorted(unclaimed):
-        # Seeded per protein, not from one walk of the file, so the assignment
-        # does not depend on how many proteins were processed before this one.
-        x = random.Random(f"{seed}:unclaimed:{p}").random() * total
-        acc = 0.0
-        for s in active:
-            acc += weights[s]
-            if x < acc:
-                if s == split:
-                    mine.add(p)
-                break
-    return mine
 
 
 def pick_pairs(fam1, fam2, members, available, parent_of, n, label, seed):
@@ -207,21 +178,18 @@ def main():
         help="SELECT_EXAMPLES {split}_candidate_examples.csv -- pairs already claimed inside its ILP",
     )
     ap.add_argument("--universe", required=True, help="SELECT_EXAMPLES {split}_universe.txt")
-    ap.add_argument("--unclaimed", required=True, help="SELECT_EXAMPLES unclaimed.txt")
+    ap.add_argument(
+        "--reserve",
+        required=True,
+        help="SELECT_EXAMPLES {split}_reserve.txt: this split's share of the parent proteins no "
+        "candidate ever reached. SELECT_EXAMPLES partitions them, so nothing here belongs to "
+        "another split (under split_method=random every split gets the whole pool, by design).",
+    )
     ap.add_argument("--instances", required=True, help="instances.tsv")
     ap.add_argument("--fasta", required=True, help="this split's instance FASTA")
     ap.add_argument("--output", required=True, help="output instance-level labelled CSV")
     ap.add_argument("--split-name", required=True, help="train | val | test_balanced | test_realistic")
     ap.add_argument("--examples-target", type=int, default=5, help="N: cap on examples per pair (default 5)")
-    ap.add_argument("--train-split", type=float, default=0.8, help="split fractions weight the unclaimed share")
-    ap.add_argument("--val-split", type=float, default=0.1)
-    ap.add_argument("--test-split", type=float, default=0.1)
-    ap.add_argument(
-        "--allow-shared-parents",
-        action="store_true",
-        help="draw from the whole unclaimed pool rather than this split's share, matching "
-        "SELECT_EXAMPLES under split_method=random, where overlapping universes are the point.",
-    )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
     args = ap.parse_args()
@@ -250,9 +218,7 @@ def main():
     pos_examples = examples_by_family_pair(args.examples)
     cand_examples = examples_by_family_pair(args.candidate_examples)
     universe = read_ids(args.universe)
-    unclaimed = read_ids(args.unclaimed)
-    weights = {"train": args.train_split, "val": args.val_split, "test": args.test_split}
-    share = unclaimed if args.allow_shared_parents else unclaimed_share(unclaimed, split, weights, args.seed)
+    share = read_ids(args.reserve)
 
     # Instances usable for a negative pair in this split: present in the split's
     # FASTA (an example with no sequence cannot be embedded) and parented by a

@@ -2,6 +2,9 @@
 .nextflow*
 work/
 results/
+# Default --interpro_cache for -profile test_ddi (Pfam/UniProt reference tables
+# plus the sampled instances, keyed by Pfam release).
+.pfam_cache/
 # data/ is ignored except for the committed smoke-test fixtures. Note this has
 # to be `data/*` rather than `data/`: git cannot re-include a file whose parent
 # directory is itself excluded, so a bare `data/` would make the negations below

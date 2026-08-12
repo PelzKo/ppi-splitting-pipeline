@@ -42,7 +42,6 @@ import re
 import shutil
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
 
@@ -87,12 +86,21 @@ N_TIERS = len(TIERS)
 
 
 def _open_url(url, retries=3, timeout=120):
-    """Open a URL for streaming, retrying transient failures with 2**attempt backoff."""
+    """Open a URL for streaming, retrying transient failures with 2**attempt backoff.
+
+    Catches OSError rather than the URLError pair: a connect or read timeout can
+    surface as a bare TimeoutError (socket.timeout is an alias for it) without
+    being wrapped, and gzip.BadGzipFile on a truncated small download is another
+    OSError subclass. HTTPError and URLError are both OSError subclasses too, so
+    this is a widening, not a change of intent. Note it covers the *open* only --
+    a truncation part-way through the 6.3 GB stream raises out of the caller's
+    iteration, which is what FETCH_DOMAIN_META's 'error_retry' label is for.
+    """
     req = urllib.request.Request(url, headers={"Accept-Encoding": "identity"})
     for attempt in range(retries):
         try:
             return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
-        except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        except OSError as exc:
             if attempt < retries - 1:
                 time.sleep(2**attempt)
                 continue
@@ -446,9 +454,37 @@ class Cache:
         return text
 
 
-def derived_key(release, families, pool_size, seed):
-    """Hash every input that can change the sampled instance set."""
-    payload = "|".join([str(FORMAT_VERSION), release, str(pool_size), str(seed), ",".join(sorted(families))])
+def content_digest(items):
+    """Stable digest of a set of ids, for the cache key. ~0.3 s over 570k accessions."""
+    return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()
+
+
+def derived_key(release, families, pool_size, seed, reviewed_digest, taxa_digest):
+    """Hash every input that can change the cached instance set or its columns.
+
+    The two UniProt tables belong in here as much as the Pfam release does.
+    tier_of() reads `reviewed` to place an instance in a tier and the tier cascade
+    decides which instances survive, so a new UniProt release -- roughly every
+    eight weeks -- changes the sample at the same --seed against the same Pfam
+    release. `taxa` does not move the sample, but it fills instances.tsv's
+    taxon_id column, and that file is what the cache hands back.
+
+    Hashing their content also settles the Cache's pinning: reviewed.list and
+    speclist.txt are filed under pfam-{release}/, so a warm cache freezes the
+    sample -- which is the right behaviour on one machine, but left two machines
+    with differently-aged caches silently disagreeing under one key.
+    """
+    payload = "|".join(
+        [
+            str(FORMAT_VERSION),
+            release,
+            str(pool_size),
+            str(seed),
+            reviewed_digest,
+            taxa_digest,
+            ",".join(sorted(families)),
+        ]
+    )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -528,7 +564,14 @@ def main():
         file=sys.stderr,
     )
 
-    key = derived_key(release, families, args.pool_size, args.seed)
+    key = derived_key(
+        release,
+        families,
+        args.pool_size,
+        args.seed,
+        content_digest(reviewed),
+        content_digest(f"{mnemonic}\t{taxon}" for mnemonic, taxon in taxa.items()),
+    )
     cached_instances = cache.path(f"instances-{key}.tsv")
     cached_sequences = cache.path(f"sequences-{key}.fasta")
     stats = Counter()

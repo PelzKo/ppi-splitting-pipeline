@@ -99,13 +99,12 @@ workflow SPLIT_POSITIVES {
         // keyed (meta, split), so SAMPLE_NEGATIVES can pick it up with one
         // combine(by: [0, 1]) -- and so the test entry is broadcast to both
         // test_balanced and test_realistic rather than joined 1:1 with one of them.
-        ddi_files = sel.train_examples.join(sel.train_candidates).join(sel.train_universe).join(fasta_train)
-                .map { meta, ex, cand, uni, fa -> tuple(meta, "train", ex, cand, uni, fa) }
-            .mix(sel.val_examples.join(sel.val_candidates).join(sel.val_universe).join(fasta_val)
-                .map { meta, ex, cand, uni, fa -> tuple(meta, "val", ex, cand, uni, fa) })
-            .mix(sel.test_examples.join(sel.test_candidates).join(sel.test_universe).join(fasta_test)
-                .map { meta, ex, cand, uni, fa -> tuple(meta, "test", ex, cand, uni, fa) })
-        unclaimed      = sel.unclaimed
+        ddi_files = sel.train_examples.join(sel.train_candidates).join(sel.train_universe).join(sel.train_reserve).join(fasta_train)
+                .map { meta, ex, cand, uni, res, fa -> tuple(meta, "train", ex, cand, uni, res, fa) }
+            .mix(sel.val_examples.join(sel.val_candidates).join(sel.val_universe).join(sel.val_reserve).join(fasta_val)
+                .map { meta, ex, cand, uni, res, fa -> tuple(meta, "val", ex, cand, uni, res, fa) })
+            .mix(sel.test_examples.join(sel.test_candidates).join(sel.test_universe).join(sel.test_reserve).join(fasta_test)
+                .map { meta, ex, cand, uni, res, fa -> tuple(meta, "test", ex, cand, uni, res, fa) })
         // Mixed into sorted_mqc rather than threaded through QC as a 17th take:
         // QC only collects that channel for MULTIQC, and both are splitting-stage
         // diagnostics.
@@ -115,7 +114,6 @@ workflow SPLIT_POSITIVES {
         out_val_ppis   = fam_val
         out_test_ppis  = fam_test
         ddi_files      = channel.empty()
-        unclaimed      = channel.empty()
         sorted_mqc     = splitter_mqc
     }
 
@@ -126,11 +124,9 @@ workflow SPLIT_POSITIVES {
     train_fasta = fasta_train
     val_fasta   = fasta_val
     test_fasta  = fasta_test
-    // DDI mode only; both empty in PPI mode.
-    // ddi_files: tuple(meta, split, examples, candidate_examples, universe, fasta)
-    // unclaimed: tuple(meta, path) -- run-wide for the dataset, not per split
+    // DDI mode only; empty in PPI mode.
+    // ddi_files: tuple(meta, split, examples, candidate_examples, universe, reserve, fasta)
     ddi_files   = ddi_files
-    unclaimed   = unclaimed
     sorted_mqc  = sorted_mqc
     nr_mqc      = nr.mqc
 }

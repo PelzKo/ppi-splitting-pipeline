@@ -107,13 +107,13 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 
 **REMOVE_REDUNDANT** — Removes proteins from val and test that are too similar to any training protein using the CD-HIT 2D TSVs. Only runs for `kahip`/`ilp` splits. Its kept-vs-removed counts feed into the same "PPI Partitioning" chart `SORT_PPIS`/`SOLVE_ILP` started (stacked `Kept` vs `Removed (CD-HIT)` for the `train`/`val`/`test` bars). In DDI mode the verdict is taken one level up and strictly: a family survives only if *every* one of its instances in that split survived, and dropping a family drops every DDI touching it.
 
-**SELECT_EXAMPLES** — DDI mode only. Picks up to `N` domain-instance pairs ("examples") per surviving DDI under one rule: **no parent protein may be used by more than one split**. That rule couples the splits — claiming a protein for train takes it away from test — so it is solved as one ILP (CVXPY) over all three splits at once, and only over the proteins two splits actually compete for; the rest is a local pick. Candidate pairs are any instance of family A × any instance of family B, preferring distinct parents over reusing one, and `candidate_network` pairs claim their parents in the same ILP. Emits the per-split example tables, each split's **protein universe** (the parents it claimed), the proteins no candidate ever reached (`unclaimed.txt`), the DDI lists with zero-example DDIs removed, and a drop report.
+**SELECT_EXAMPLES** — DDI mode only. Picks up to `N` domain-instance pairs ("examples") per surviving DDI under one rule: **no parent protein may be used by more than one split**. That rule couples the splits — claiming a protein for train takes it away from test — so it is solved as one ILP (CVXPY) over all three splits at once, and only over the proteins two splits actually compete for; the rest is a local pick. Candidate pairs are any instance of family A × any instance of family B, preferring distinct parents over reusing one, and `candidate_network` pairs claim their parents in the same ILP. Emits the per-split example tables, each split's **protein universe** (the parents it claimed), the proteins no candidate ever reached (`unclaimed.txt`, plus a `{split}_reserve.txt` share of them per split, weighted by the DDIs that split kept), the DDI lists with zero-example DDIs removed, and a drop report.
 
 **SAMPLE_NEGATIVES_DEGREE** — Samples random negative pairs for each split. By default, negatives are drawn such that each protein's degree distribution is approximately preserved, producing a balanced test set (1:1 positive:negative) and a realistic test set (1:10 ratio). With `negative_sampling_method=uniform`, endpoints are instead drawn fully uniformly at random for *every* split (not just the realistic test set) — see [Naive baseline: the topology shortcut](#naive-baseline-the-topology-shortcut-optional) below.
 
 **SAMPLE_NEGATIVES_ILP** – An ILP-based alternative satisfying the size constraints while minimizing biases between the positive and negative sets; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below.
 
-**EXPAND_NEGATIVES** — DDI mode only. Both samplers draw negatives as family pairs; this step turns them into the instance pairs the classifier trains on. Positives are copied from `SELECT_EXAMPLES` rather than redrawn, and each negative family pair gets up to `N` instance pairs from that split's own protein universe, drawn by the same rule the positives were — topped up from the never-claimed proteins when the universe is too thin. Nothing is resampled to repair the ratio: a negative pair can end up with fewer than `N` examples, so the example-level ratio can drift from the family-level one. Both are reported.
+**EXPAND_NEGATIVES** — DDI mode only. Both samplers draw negatives as family pairs; this step turns them into the instance pairs the classifier trains on. Positives are copied from `SELECT_EXAMPLES` rather than redrawn, and each negative family pair gets up to `N` instance pairs from that split's own protein universe, drawn by the same rule the positives were — topped up from this split's reserve of never-claimed proteins when the universe is too thin, which `SELECT_EXAMPLES` has already partitioned so no two splits can be handed the same one. Nothing is resampled to repair the ratio: a negative pair can end up with fewer than `N` examples, so the example-level ratio can drift from the family-level one. Both are reported.
 
 **EMBED_SEQUENCES** — Computes per-protein embeddings using the selected model:
 - `none` — 21-dimensional mean-pooled one-hot amino acid composition
@@ -311,7 +311,9 @@ become DDIs.
 ```bash
 nextflow run main.nf --samplesheet samplesheet_ddi.csv --ddi_mode --outdir results -profile conda
 
-# smoke test on the committed list of real Pfam family pairs (queries Pfam live)
+# smoke test on the committed list of real Pfam family pairs. The first run queries
+# Pfam live (~6.3 GB stream); the profile caches into <projectDir>/.pfam_cache, so
+# every run after that is a stat and a read.
 nextflow run main.nf -profile test_ddi,conda
 ```
 
@@ -370,7 +372,8 @@ coordinates, taxon and source database.
 | `ddi_select_verbose`       | `false` | Let the `SELECT_EXAMPLES` solver print its own log to `.command.err`. Off by default: one block per ILP solve, which is large at real DDI counts |
 | `pfam_fasta`               | `null`  | Local `Pfam-A.fasta.gz`, skipping the ~6.3 GB download                                                                                          |
 | `pfam_clans`               | `null`  | Local `Pfam-A.clans.tsv(.gz)`, skipping that download                                                                                           |
-| `interpro_cache`           | `null`  | Directory for the cached downloads. A convenience only: a cold run produces identical output                                                     |
+| `pfam_release`             | `null`  | Pin the release string (e.g. `38.2`) instead of downloading `Pfam.version`. That lookup happens before the cache directory is known, so it is the one fetch a warm cache cannot skip |
+| `interpro_cache`           | `null`  | Directory for the cached downloads and sampled instances. **Must be an absolute path on a filesystem all compute nodes share** — it is resolved to one, but node-local scratch gives every task its own cold cache. A convenience only: a cold run produces identical output. `-profile test_ddi` sets it to `<projectDir>/.pfam_cache` |
 
 `SELECT_EXAMPLES` reuses `--ilp_solver` and `--gurobi_license` rather than adding
 its own; every other parameter (`cdhit_*`, `ilp_*`, `neg_ilp_*`, the split
@@ -389,7 +392,8 @@ results/<id>/
 │   ├── {train,val,test}_examples.csv            # the selected instance pairs
 │   ├── {train,val,test}_candidate_examples.csv  # the same, for candidate_network negatives
 │   ├── {train,val,test}_universe.txt            # the parent proteins this split claimed; no other split may use them
-│   └── unclaimed.txt                            # parents no candidate example reached -- the spare pool
+│   ├── {train,val,test}_reserve.txt             # this split's share of the spare pool, weighted by the DDIs it kept
+│   └── unclaimed.txt                            # parents no candidate example reached -- the spare pool, unpartitioned
 ├── {train,val,test_balanced,test_realistic}.csv            # family-level labelled pairs
 └── {train,val,test_balanced,test_realistic}_instances.csv  # instance-level -- what the classifier trains on
 ```
@@ -577,4 +581,4 @@ This fits a Ridge regressor (on positive pairs only) to predict each STRING evid
 - Conda (for the environment) — or install the packages in `environment.yml` manually
 - Internet access for the initial UniProt fetch (subsequent runs use cached Nextflow work directories)
 - A GPU is recommended but not required for `esm2` and `prot_t5` embedding models
-- For DDI mode, internet access for the Pfam pass — one ~6.3 GB transfer per run, or none if `--pfam_fasta`/`--pfam_clans` point at local copies. `--interpro_cache <dir>` makes repeat runs a stat and a read
+- For DDI mode, internet access for the Pfam pass — one ~6.3 GB transfer per run, or none if `--pfam_fasta`/`--pfam_clans` point at local copies. `--interpro_cache <abs-dir>` makes repeat runs a stat and a read (plus one small `Pfam.version` request, which `--pfam_release` removes)

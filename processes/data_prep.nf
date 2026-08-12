@@ -22,10 +22,17 @@ process FETCH_DATA {
 process FETCH_DOMAIN_META {
     publishDir(path: { "${params.outdir}/${meta.id}/data" }, mode: 'copy')
     tag "${meta.id}"
+    // One ~6.3 GB stream and no checkpoint. _open_url's own retry loop covers
+    // the open only: a mid-stream truncation surfaces as an EOFError out of the
+    // gzip reader and kills the task, so without this label one EBI hiccup takes
+    // out a six-hour job and everything downstream of it.
+    label 'error_retry'
 
     input:
     tuple val(meta), path(families)  // plain text, one Pfam family accession per line
     path clans                       // Pfam-A.clans.tsv(.gz), or [] to download it
+    path pfam_fasta                  // local Pfam-A.fasta.gz, or [] to stream it from EBI
+    val cache_dir                    // absolute cache directory, or '' for no cache
 
     output:
     tuple val(meta), path("sequences.fasta"),    emit: sequences
@@ -34,10 +41,14 @@ process FETCH_DOMAIN_META {
     tuple val(meta), path("instances.tsv"),      emit: instances
 
     script:
-    def pool_size  = (params.ddi_examples_target as int) * (params.ddi_examples_pool_factor as int)
-    def clans_arg  = clans              ? "--clans ${clans}"                        : ''
-    def cache_arg  = params.interpro_cache ? "--interpro-cache ${params.interpro_cache}" : ''
-    def fasta_arg  = params.pfam_fasta  ? "--pfam-fasta ${params.pfam_fasta}"       : ''
+    def pool_size   = (params.ddi_examples_target as int) * (params.ddi_examples_pool_factor as int)
+    def clans_arg   = clans      ? "--clans ${clans}"           : ''
+    def fasta_arg   = pfam_fasta ? "--pfam-fasta ${pfam_fasta}" : ''
+    // The one input that cannot be staged, because the task writes to it: a
+    // relative --interpro-cache would resolve inside the work directory and be
+    // thrown away with it. DATA_PREP_DDI absolutises the param for that reason.
+    def cache_arg   = cache_dir  ? "--interpro-cache ${cache_dir}" : ''
+    def release_arg = params.pfam_release ? "--pfam-release ${params.pfam_release}" : ''
     """
     fetch_domains.py \\
         --families  ${families} \\
@@ -45,7 +56,8 @@ process FETCH_DOMAIN_META {
         --seed      ${params.seed} \\
         ${clans_arg} \\
         ${cache_arg} \\
-        ${fasta_arg}
+        ${fasta_arg} \\
+        ${release_arg}
     """
 }
 

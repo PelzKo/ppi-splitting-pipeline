@@ -73,12 +73,14 @@ process CDHIT2D {
     tuple val(meta), val(label), path("cdhit.out"), emit: sim
 
     script:
-    // cd-hit-2d errors out on an empty -i2, which happens whenever db2's split has a
-    // 0 fraction. An empty cdhit.out is the correct answer anyway -- REMOVE_REDUNDANT
-    // reads it as "nothing to keep" and the split stays empty -- so guard here rather
+    // cd-hit-2d errors out on an empty -i or -i2, which happens whenever that side's
+    // split has a 0 fraction (train_split = 0 is odd but permitted, and only ilp and
+    // random read the fractions at all). An empty cdhit.out is the correct answer
+    // either way -- REMOVE_REDUNDANT reads it as "no redundancy found", so a split
+    // with nothing to compare against keeps everything it has -- so guard here rather
     // than filtering the channel, which would drop the dataset from the 9-way join.
     """
-    if [ -s ${db2_fasta} ]; then
+    if [ -s ${db1_fasta} ] && [ -s ${db2_fasta} ]; then
         cd-hit-2d \\
             -i  ${db1_fasta} \\
             -i2 ${db2_fasta} \\
@@ -165,6 +167,14 @@ process SELECT_EXAMPLES {
     tuple val(meta), path("train_candidate_examples.csv"), emit: train_candidates
     tuple val(meta), path("val_candidate_examples.csv"),   emit: val_candidates
     tuple val(meta), path("test_candidate_examples.csv"),  emit: test_candidates
+    // The parents no candidate ever reached, split three ways here rather than
+    // re-derived per EXPAND_NEGATIVES task: this is the only task that sees all
+    // three splits, so it can weight the partition by realised split size.
+    tuple val(meta), path("train_reserve.txt"), emit: train_reserve
+    tuple val(meta), path("val_reserve.txt"),   emit: val_reserve
+    tuple val(meta), path("test_reserve.txt"),  emit: test_reserve
+    // Their union, published unpartitioned as a diagnostic -- and what
+    // bin/other/check_ddi_invariants.py reads.
     tuple val(meta), path("unclaimed.txt"), emit: unclaimed
     tuple val(meta), path("*_mqc.tsv"),     emit: mqc
 

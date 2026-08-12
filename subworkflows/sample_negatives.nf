@@ -16,9 +16,8 @@ workflow SAMPLE_NEGATIVES {
     species_ch              // tuple(meta, path)
     go_annotations_ch        // tuple(meta, path)
     candidate_network_ch      // tuple(meta, candidate_network_or_[])
-    ddi_files_ch               // tuple(meta, split, examples, cand_examples, universe, fasta); empty in PPI mode
-    unclaimed_ch                // tuple(meta, path); empty in PPI mode
-    instances_ch                 // tuple(meta, instances_or_[])
+    ddi_files_ch               // tuple(meta, split, examples, cand_examples, universe, reserve, fasta); empty in PPI mode
+    instances_ch                // tuple(meta, instances_or_[])
 
     main:
     // One channel, one process: each (meta, label) item becomes its own
@@ -73,9 +72,8 @@ workflow SAMPLE_NEGATIVES {
         exp_inputs = fam_labelled
             .map { meta, label, f -> tuple(meta, label.startsWith("test") ? "test" : label, label, f) }
             .combine(ddi_files_ch, by: [0, 1])
-            .combine(unclaimed_ch, by: 0)
             .combine(instances_ch, by: 0)
-        // tuple(meta, split, label, labelled, examples, cand_examples, universe, fasta, unclaimed, instances)
+        // tuple(meta, split, label, labelled, examples, cand_examples, universe, reserve, fasta, instances)
 
         exp_out      = EXPAND_NEGATIVES(exp_inputs)
         neg_labelled = exp_out.labelled
