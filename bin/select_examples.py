@@ -218,7 +218,7 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
         for (p, _), idx in claim_index.items():
             by_prot[p].append(idx)
         rows, cols = [], []
-        for pi, idxs in enumerate(sorted(by_prot.values())):
+        for pi, (_p, idxs) in enumerate(sorted(by_prot.items())):
             for idx in idxs:
                 rows.append(pi)
                 cols.append(idx)
@@ -311,7 +311,13 @@ def example_rows(units):
     """
     rows = []
     for u in units:
-        extra = {k: v for k, v in u.row.items() if k not in ("protein1", "protein2")}
+        # family1/family2 are excluded as well as the id columns: an input CSV --
+        # a --candidate-network file in particular, since those come from outside
+        # the pipeline -- that happens to carry a family1 column would otherwise
+        # overwrite the computed family pair, poisoning utils.read_family_pairs()
+        # and with it train_classifier.py's family aggregation and
+        # bias_analysis.py's node_pairs. Matches expand_negatives.write_expanded.
+        extra = {k: v for k, v in u.row.items() if k not in ("protein1", "protein2", "family1", "family2")}
         for a, b in u.picked:
             rows.append({"protein1": a, "protein2": b, "family1": u.fam1, "family2": u.fam2, **extra})
     return rows
@@ -606,6 +612,29 @@ def main():
     # Parents no candidate ever reached. A contested parent the ILP left
     # unclaimed is deliberately in neither list -- handing it to a split now
     # would reintroduce the leak the one-split-per-parent rule just prevented.
+    #
+    # This reserve exists so a negative family pair whose own split universe
+    # cannot reach N examples has somewhere else to draw from without breaking
+    # one-split-per-parent: a parent here belongs to no split, so giving it to one
+    # takes it from none.
+    #
+    # It is all but inert at --examples-pool-factor 1 (M = N). A reserve parent is
+    # only usable downstream if one of its instances is also in the target split's
+    # FASTA, and every instance in that FASTA already has its parent recorded in
+    # splits_of: the instance's family is in the split CSV, and pair_candidates()
+    # enumerates the full cross product of both families' available instances, so
+    # every available instance of every family in the split turns up in some
+    # candidate pair. The only escape is a family whose every DDI had a partner
+    # family with zero available instances.
+    #
+    # Above factor 1 the mechanism becomes live: a family then holds M = N * factor
+    # instances while selection claims at most N per DDI, so genuinely unclaimed
+    # parents exist and expand_negatives' extension path fires. The target
+    # configuration is factor 2-3, so this is not dead code -- it is code whose
+    # only exercise so far has been at the one setting where it cannot trigger.
+    # Treat its first factor >= 2 run as untested: watch the "Extended with
+    # unclaimed" MQC column go non-zero and confirm check_ddi_invariants.py still
+    # passes on that run.
     write_ids(all_parents - set(splits_of), "unclaimed.txt")
     print(
         f"{len(all_parents - set(splits_of)):,} parent proteins never in play "

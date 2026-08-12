@@ -24,9 +24,15 @@ Negatives are drawn here, by the same rule the positives were:
     split's universe is in no other's.
   * a pair whose universe-restricted pool cannot reach N is retried against the
     split's share of the proteins no candidate ever reached (unclaimed.txt).
-    That share is computed identically in every split's task, from the same file
-    and seed, so the four tasks cannot hand the same protein to two splits
-    without talking to each other.
+    A parent in that reserve belongs to no split, so handing it to one takes it
+    from none. The share is computed identically in every split's task, from the
+    same file and seed, so the four tasks cannot hand the same protein to two
+    splits without talking to each other.
+
+    This reserve path is all but inert at --examples-pool-factor 1 and becomes
+    live above it -- see the long note beside write_ids(..., "unclaimed.txt") in
+    select_examples.py for why. The target configuration is factor 2-3, so the
+    `extended` counter below is expected to leave zero there for the first time.
 
 Because positives are pure co-occurrence too, positives and negatives come out
 of the same procedure in this mode -- the provenance asymmetry the PPI pipeline
@@ -294,6 +300,9 @@ def main():
         extra = {k: v for k, v in row.items() if k in extras}
         reused = cand_examples.get(unordered(fam1, fam2))
         if reused:
+            # The slice is belt-and-braces: SELECT_EXAMPLES already capped each
+            # candidate pair at min(n, len(cands)) with the same --examples-target,
+            # so it never trims anything today.
             picked = sorted(reused)[:n]
             from_cand += 1
         else:

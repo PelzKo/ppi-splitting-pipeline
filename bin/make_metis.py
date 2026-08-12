@@ -109,8 +109,8 @@ def write_metis(nodes, edges, graph_path, mapping_path):
     n = len(nodes)
     # METIS defines m as sum(|neighbours|) / 2, so count what is actually
     # written rather than len(edges): an edge whose endpoints were filtered out
-    # above contributes nothing, and a self-loop contributes one adjacency entry
-    # instead of two.  A header that disagrees with the body makes KaHIP abort.
+    # above contributes nothing.  A header that disagrees with the body makes
+    # KaHIP abort.
     m = sum(len(v) for v in adj.values()) // 2
 
     with open(graph_path, "w") as fh:

@@ -318,11 +318,18 @@ ATTRIBUTES = {
     "parent_degree": lambda pairs, ctx: parent_degree(pairs),
 }
 
-# Attributes whose A is categorical or small-cardinality integral, so the exact
-# contingency-table estimator beats the kNN one. same_species is deliberately
-# absent: it is continuous-estimated today and moving it would change PPI-mode
-# numbers for no DDI-mode gain.
-DISCRETE_ATTRIBUTES = {"self_interactions", "parent_degree"}
+# Attributes whose A is binary, so the exact contingency-table estimator beats
+# the kNN one. same_species is deliberately absent: it is continuous-estimated
+# today and moving it would change PPI-mode numbers for no DDI-mode gain.
+#
+# parent_degree is deliberately absent too, and must stay that way: it is
+# (deg[a] + deg[b]) / 2, i.e. dozens of distinct half-integers. Contingency MI on
+# a high-cardinality A is biased upward toward H(y), so with H(A) ~ ln(card) the
+# reported NMI = MI / sqrt(H(A)*H(y)) lands near sqrt(H(y) / ln n) ~ 0.3 on a few
+# hundred rows even when A carries no label information -- which inverts the
+# attribute's whole purpose (see its docstring). sklearn jitters tied continuous
+# features before the kNN estimate, so integral values need no manual binning.
+DISCRETE_ATTRIBUTES = {"self_interactions"}
 
 
 def write_mqc(attribute, results):

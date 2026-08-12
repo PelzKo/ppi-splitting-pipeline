@@ -75,7 +75,14 @@ def _seed_option(solver, seed):
     the same number of cross-cluster PPIs, and which one comes back is decided
     by the solver's internal randomisation. Without this the splits are not
     reproducible even at a fixed --seed. Mirrors sample_negatives_ilp._solver_options.
+
+    The name is upper-cased first because cp.GUROBI/HIGHS/SCIP are uppercase
+    strings while the sibling params.neg_ilp_solver spells its solvers lowercase
+    ("gurobi", "scip", "highs"). Matching the raw string would return {} for
+    "gurobi" -- an unseeded, non-reproducible solve behind nothing but a stderr
+    warning -- the moment ilp_solver follows that convention.
     """
+    solver = (solver or "").upper()
     if solver == cp.GUROBI:
         return {"Seed": seed}
     if solver == cp.HIGHS:

@@ -175,6 +175,9 @@ process SELECT_EXAMPLES {
     // naive baseline shows the leak; claiming each parent for one split would repair
     // part of it, exactly like routing "random" through CD-HIT would.
     def shared_arg     = meta.split_method == "random" ? "--allow-shared-parents" : ''
+    // Off by default: the solver log is one block per ILP solve, harmless on a
+    // small fixture and a large .command.err at real DDI counts.
+    def verbose_arg    = params.ddi_select_verbose ? '--verbose' : ''
     """
     ${license_export}
     select_examples.py \\
@@ -194,7 +197,7 @@ process SELECT_EXAMPLES {
         --max-sec           ${params.ddi_select_max_sec} \\
         --seed              ${params.seed} \\
         --id                ${meta.id} \\
-        --verbose \\
+        ${verbose_arg} \\
         ${params.ilp_solver ? "--solver ${params.ilp_solver}" : ""}
     """
 }

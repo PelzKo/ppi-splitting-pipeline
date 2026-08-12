@@ -98,9 +98,5 @@ workflow SAMPLE_NEGATIVES {
     val            = neg_branched.val.map            { meta, label, f -> tuple(meta, f) }
     test_balanced  = neg_branched.test_balanced.map  { meta, label, f -> tuple(meta, f) }
     test_realistic = neg_branched.test_realistic.map { meta, label, f -> tuple(meta, f) }
-    // The family-level CSVs, before instance expansion. Identical to the four
-    // channels above in PPI mode; in DDI mode this is the level the DDI graph's
-    // own diagnostics (family degree, taxon pairs) have to be computed on.
-    family_labelled = fam_labelled
-    mqc             = neg_mqc
+    mqc            = neg_mqc
 }
