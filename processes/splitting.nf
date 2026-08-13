@@ -204,7 +204,8 @@ process SELECT_EXAMPLES {
         --shortlist-factor  ${params.ddi_shortlist_factor} \\
         --candidate-factor  ${params.ddi_candidate_factor} \\
         --lambda-diversity  ${params.ddi_lambda_diversity} \\
-        --max-sec           ${params.ddi_select_max_sec} \\
+        --max-sec              ${params.ddi_select_max_sec} \\
+        --max-ilp-candidates   ${params.ddi_max_ilp_candidates} \\
         --seed              ${params.seed} \\
         --id                ${meta.id} \\
         ${verbose_arg} \\

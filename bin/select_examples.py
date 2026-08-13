@@ -15,30 +15,43 @@ examples a split can still reach depends on what the other splits took. Greedy
 order would decide the outcome, so it is solved as an ILP over all three splits
 jointly.
 
-Two reductions keep that ILP small:
+Three reductions keep that ILP small, none of them an approximation:
 
   * Only *contested* parents -- proteins carrying candidates in more than one
     split -- get claim variables. A parent in play for a single split can be
     claimed for free, so every DDI whose candidates touch no contested parent is
     decoupled from the rest of the problem and is settled by a local diversity
-    greedy instead. This is a decomposition, not an approximation.
+    greedy instead.
+  * What is left is then cut into connected components over the contested parents
+    they share (component_partition), and each component is solved on its own.
+    Every constraint is either per-unit or per-parent and the objective is a sum
+    of per-unit terms, so units sharing no contested parent share nothing -- this
+    is the same reduction as the point above, carried one step further from
+    "touches no contested parent" to "shares no contested parent, transitively".
+    It is what makes the target scale (~90k surviving DDIs, so millions of
+    variables in one model) tractable at all.
   * A per-DDI shortlist caps the candidate pool at K = shortlist_factor * N. At
     the default pool size (M = N = 5, so 25 candidates) it trims almost nothing
     and exists as a guard for a larger --ddi_examples_pool_factor.
 
-The objective is lexicographic, solved as one bounded stage per level, so the
-constants stay at the scale of the example counts instead of the products a
-single weighted objective would need:
+Within a component the objective is lexicographic, solved as one bounded stage
+per level, so every coefficient stays 1 or lambda rather than a constant large
+enough to outrank its own tail:
 
   1. keep as many positive DDIs as possible at >= 1 example (a DDI that reaches
      zero is dropped outright, so this level is what stops the solver starving
      one DDI to complete another),
-  2. then maximise the positive DDIs reaching the full N, then total positive
-     examples, then example diversity (distinct parents),
-  3. then the same for the candidate_network negatives, which ride in the same
+  2. then maximise the positive DDIs reaching the full N,
+  3. then total positive examples, less the diversity penalty on parent reuse,
+  4. then the same for the candidate_network negatives, which ride in the same
      claim accounting so their examples inherit the one-split-per-parent rule by
      construction -- but strictly below the positives, so a negative can never
      take a parent a positive needed.
+
+A component too large for --max-ilp-candidates, or reached after the --max-sec
+budget is spent, drops to a deterministic greedy (greedy_component) that keeps
+one-split-per-parent exactly and loses only optimality. That path is counted and
+reported, never silent.
 
 --allow-shared-parents turns the whole claim mechanism off, which is what
 split_method=random needs: that path deliberately puts a node in more than one
@@ -57,7 +70,9 @@ import argparse
 import math
 import os
 import random
+import statistics
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -132,40 +147,133 @@ def _sum(var, idx):
     return cp.sum(var[idx]) if idx else cp.Constant(0.0)
 
 
-def _run_stage(problem, label, solver, seed, secs, verbose):
-    """Solve one lexicographic stage; return its objective value or None."""
-    kwargs = dict(time_limit=secs, verbose=verbose)
-    if solver:
-        seed_opt = _seed_option(solver, seed)
-        if not seed_opt:
-            print(
-                f"Warning: no seed option is known for solver {solver}, so its tie-breaking is "
-                f"unseeded and this selection is not reproducible run to run.",
-                file=sys.stderr,
-            )
-        problem.solve(solver=solver, **kwargs, **seed_opt)
-    else:
+_WARNED = set()
+
+
+def _warn_once(msg, key=None):
+    """Print a warning the first time only, with the detail of that first time.
+
+    The component decomposition turns what used to be three solves per task into
+    four per component, so a per-solve warning would run to thousands of near
+    identical lines in .command.err. `key` is what makes them one warning rather
+    than one per component: the message carries the numbers of the case that
+    tripped it, the key carries only its kind. The totals are reported at the end
+    and in the DDI Example Selection ILP MultiQC table.
+    """
+    key = msg if key is None else key
+    if key not in _WARNED:
+        _WARNED.add(key)
+        print(msg, file=sys.stderr)
+
+
+@dataclass
+class SolverEnv:
+    """One solver environment reused across every component solve.
+
+    cvxpy builds a fresh Gurobi environment per solve unless it is handed one, and
+    each build re-reads and re-validates the licence. That was paid three times per
+    task before the decomposition and would be paid ~4x per component after it.
+
+    Self-disabling: if the installed cvxpy or solver does not take an `env`
+    argument the first solve raises, the environment is dropped, and every later
+    solve runs the default way. The open solvers have no such parameter and are
+    unaffected either way.
+    """
+
+    env: object = None
+
+    def kwargs(self):
+        return {"env": self.env} if self.env is not None else {}
+
+    def disable(self, exc):
         print(
-            "Warning: no --solver given, so CVXPY picks one and its internal randomisation stays "
-            "unseeded; pass --solver for a reproducible selection.",
+            f"Note: the solver did not accept a shared environment ({exc!r}); building one per "
+            f"solve instead. Slower at many components, identical in result.",
             file=sys.stderr,
         )
+        self.env = None
+
+
+def make_solver_env(solver):
+    """A shared gurobipy.Env when the solver is Gurobi, an inert holder otherwise."""
+    if (solver or "").upper() != cp.GUROBI:
+        return SolverEnv(None)
+    try:
+        import gurobipy
+
+        return SolverEnv(gurobipy.Env())
+    except Exception as exc:  # gurobipy absent, or the licence check failed here
+        print(f"Note: no shared Gurobi environment ({exc!r}); each solve builds its own.", file=sys.stderr)
+        return SolverEnv(None)
+
+
+@dataclass
+class SolveContext:
+    """Solver settings and run-level counters, threaded through every stage solve."""
+
+    solver: str = None
+    seed: int = 42
+    verbose: bool = False
+    env: SolverEnv = field(default_factory=SolverEnv)
+    stages: int = 0  # stage solves attempted
+    timeouts: int = 0  # of those, the ones that returned an incumbent at the time limit
+
+
+def _run_stage(problem, label, secs, ctx):
+    """Solve one lexicographic stage; return its objective value or None.
+
+    None means the solver came back without a usable solution -- with a per-component
+    share of the budget the ordinary cause is a limit reached before any incumbent --
+    and the caller sends that component to the greedy fallback. A solver that is
+    missing or misconfigured raises instead, which still stops the run rather than
+    quietly degrading every component.
+    """
+    kwargs = dict(time_limit=secs, verbose=ctx.verbose)
+    if ctx.solver:
+        seed_opt = _seed_option(ctx.solver, ctx.seed)
+        if not seed_opt:
+            _warn_once(
+                f"Warning: no seed option is known for solver {ctx.solver}, so its tie-breaking is "
+                f"unseeded and this selection is not reproducible run to run."
+            )
+        kwargs.update(seed_opt)
+        kwargs["solver"] = ctx.solver
+    else:
+        _warn_once(
+            "Warning: no --solver given, so CVXPY picks one and its internal randomisation stays "
+            "unseeded; pass --solver for a reproducible selection."
+        )
+
+    ctx.stages += 1
+    try:
+        problem.solve(**kwargs, **ctx.env.kwargs())
+    except Exception as exc:
+        if not ctx.env.kwargs():
+            raise
+        ctx.env.disable(exc)
         problem.solve(**kwargs)
 
     if problem.status not in cp.settings.SOLUTION_PRESENT:
-        print(f"  stage '{label}': solver status {problem.status}", file=sys.stderr)
+        _warn_once(
+            f"Warning: stage '{label}' came back with solver status {problem.status} and no usable "
+            f"solution at a {secs:.0f}s limit; that component falls back to the greedy. Raise "
+            f"--max-sec if this affects many components.",
+            key=f"nosolution:{label}",
+        )
         return None
     if problem.status == cp.settings.USER_LIMIT:
-        print(
-            f"  stage '{label}': hit the {secs}s limit before proving optimality; "
-            f"using the best incumbent found (suboptimal).",
-            file=sys.stderr,
+        ctx.timeouts += 1
+        _warn_once(
+            f"Warning: stage '{label}' hit its {secs:.0f}s limit before proving optimality and is "
+            f"using the best incumbent found. Counted in the DDI Example Selection ILP table.",
+            key=f"userlimit:{label}",
         )
-    print(f"  stage '{label}': objective {problem.value:,.4g} ({problem.status})", file=sys.stderr)
+    if ctx.verbose:
+        print(f"  stage '{label}': objective {problem.value:,.4g} ({problem.status})", file=sys.stderr)
     return float(problem.value)
 
 
-def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, verbose):
+def solve_selection(units, parent_of, contested, n, lam, max_sec, ctx):
     """Choose <= n examples per unit, one split per parent protein. Fills Unit.picked.
 
     Variables
@@ -182,6 +290,10 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
         (4) sum_s c[p,s] <= 1                           one split per parent protein
         (5) y[e] <= c[parent(e), split(d(e))]           both parents, contested only
         (6) o[d,p] >= (uses of p by d's selected examples) - 1
+
+    Returns True when the selection was solved, False when a stage came back with
+    no usable solution and the caller should fall back to the greedy. Unit.picked
+    is only written on the True path, so a False leaves the units untouched.
     """
     cand_index, unit_rows, unit_cols, caps = [], [], [], []
     for ui, u in enumerate(units):
@@ -192,7 +304,7 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
         caps.append(min(n, len(u.cands)))
     n_units, n_cand = len(units), len(cand_index)
     if n_cand == 0:
-        return
+        return True
 
     # (p, split) claim variables exist only for contested parents -- an
     # uncontested parent is in play for one split only, so claiming it costs
@@ -239,17 +351,31 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
     # Diversity: one overflow variable per (unit, parent). A pair whose two
     # instances share a parent contributes 2 to that parent's count -- coo_matrix
     # sums the duplicate entries -- which is exactly the double spend it is.
+    #
+    # A key with a single entry is dropped: its row reads y_k - 1 <= o with
+    # y_k in {0,1}, so the left side is never positive and o = 0 at every optimum.
+    # The row and its variable are unconditionally slack, so removing them cannot
+    # change the solution -- and they are the common case for a lopsided DDI (a
+    # 1 x 5 family pair leaves five of its six keys droppable).
+    key_count = defaultdict(int)
+    for ui, (a, b) in cand_index:
+        for p in (parent_of[a], parent_of[b]):
+            key_count[(ui, p)] += 1
     over_index, o_rows, o_cols = {}, [], []
     for k, (ui, (a, b)) in enumerate(cand_index):
         for p in (parent_of[a], parent_of[b]):
             key = (ui, p)
+            if key_count[key] < 2:
+                continue
             if key not in over_index:
                 over_index[key] = len(over_index)
             o_rows.append(over_index[key])
             o_cols.append(k)
-    o = cp.Variable(len(over_index), nonneg=True)
-    per_parent = sp.coo_matrix((np.ones(len(o_rows)), (o_rows, o_cols)), shape=(len(over_index), n_cand)).tocsr()
-    cons.append(per_parent @ y - 1.0 <= o)
+    o = None
+    if over_index:
+        o = cp.Variable(len(over_index), nonneg=True)
+        per_parent = sp.coo_matrix((np.ones(len(o_rows)), (o_rows, o_cols)), shape=(len(over_index), n_cand)).tocsr()
+        cons.append(per_parent @ y - 1.0 <= o)
 
     pos_u = [i for i, u in enumerate(units) if u.kind == "pos"]
     cand_u = [i for i, u in enumerate(units) if u.kind == "cand"]
@@ -258,32 +384,30 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
     pos_o = [idx for (ui, _), idx in over_index.items() if units[ui].kind == "pos"]
     cand_o = [idx for (ui, _), idx in over_index.items() if units[ui].kind == "cand"]
 
-    # Within a stage, `big` only has to outrank that stage's own example and
-    # diversity tail, so it stays at the scale of the example count rather than
-    # the product a single all-levels objective would need.
+    # One objective level per stage, every coefficient 1 or lam. An earlier
+    # formulation folded levels 2 and 3 into one expression scaled by
+    # big = sum(caps) + 1, which is ~50,001 at 10k DDIs and N = 5 -- putting the
+    # objective around 5e8 while the freeze tolerance below stayed absolute, five
+    # orders of magnitude under the solver's own feasibility slack at that
+    # magnitude. Splitting the stage removes the constant rather than tuning it.
     stages = []
     if pos_u:
-        stages.append(("keep every positive DDI", _sum(nz, pos_u), 0.2))
-        big = float(sum(caps[i] for i in pos_u)) + 1.0
-        stages.append(("fill positives to N", big * _sum(r, pos_u) + _sum(y, pos_y) - lam * _sum(o, pos_o), 0.5))
+        stages.append(("keep every positive DDI", _sum(nz, pos_u), 0.15))
+        stages.append(("fill positives to N", _sum(r, pos_u), 0.35))
+        stages.append(("maximise positive examples", _sum(y, pos_y) - lam * _sum(o, pos_o), 0.25))
     if cand_u:
-        stages.append(("expand candidate negatives", _sum(y, cand_y) - lam * _sum(o, cand_o), 0.3))
+        stages.append(("expand candidate negatives", _sum(y, cand_y) - lam * _sum(o, cand_o), 0.25))
 
     total_share = sum(s for _, _, s in stages)
     for label, expr, share in stages:
-        secs = max(10, int(max_sec * share / total_share))
-        value = _run_stage(cp.Problem(cp.Maximize(expr), cons), label, solver, seed, secs, verbose)
+        secs = max(1.0, max_sec * share / total_share)
+        value = _run_stage(cp.Problem(cp.Maximize(expr), cons), label, secs, ctx)
         if value is None:
-            print(
-                f"SELECT_EXAMPLES could not solve the '{label}' stage. The model is always feasible "
-                f"(selecting nothing satisfies every constraint), so this is a solver failure rather "
-                f"than an over-constrained problem -- check the solver's own log above.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            return False
         # Freeze this level before optimising the next. An incumbent from a
         # timed-out stage is still achievable, so the bound stays satisfiable.
-        cons = cons + [expr >= value - 1e-4]
+        # Relative, so the slack tracks the objective's own magnitude.
+        cons = cons + [expr >= value - max(1e-4, 1e-6 * abs(value))]
 
     y_val = np.asarray(y.value).ravel()
     for k, (ui, pair) in enumerate(cand_index):
@@ -293,6 +417,173 @@ def solve_selection(units, parent_of, contested, n, lam, max_sec, solver, seed, 
         # Trim defensively: a solver returning 0.5+eps on more candidates than
         # the cap would otherwise leak an extra example into the output.
         u.picked = sorted(u.picked)[: caps[ui]]
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Decomposition, fallback and the driver over both
+# ---------------------------------------------------------------------------
+
+
+def component_partition(units, parent_of, contested):
+    """Cut the ILP units into independent sub-problems over the parents they share.
+
+    Nodes are units and contested parents, with an edge wherever a unit has a
+    candidate pair on that parent; the connected components of that graph are
+    sub-problems that share no variable and no constraint. Every constraint is
+    either per-unit (the cap, the >= nz and >= n*r rows, the overflow rows) or
+    per-parent (one split per parent, and y <= c), and the objective is a sum of
+    per-unit terms -- so maximising each component's stage separately and freezing
+    each component's own optimum is identical to doing it globally.
+
+    A contested parent therefore lives in exactly one component, which is what lets
+    the greedy fallback keep its claim bookkeeping local.
+
+    Returns lists of Units, largest candidate count first, so the components that
+    dominate the cost are solved before any stop-loss can fire.
+    """
+    uf = list(range(len(units)))
+
+    def find(x):
+        while uf[x] != x:
+            uf[x] = uf[uf[x]]  # path halving
+            x = uf[x]
+        return x
+
+    first_seen = {}
+    for ui, u in enumerate(units):
+        for a, b in u.cands:
+            for p in (parent_of[a], parent_of[b]):
+                if p not in contested:
+                    continue
+                if p in first_seen:
+                    ra, rb = find(ui), find(first_seen[p])
+                    if ra != rb:
+                        uf[ra] = rb
+                else:
+                    first_seen[p] = ui
+
+    groups = defaultdict(list)
+    for ui in range(len(units)):
+        groups[find(ui)].append(ui)
+    # Sorted by size then by the lowest unit index, so the order does not depend on
+    # dict iteration and two runs of the same input solve the same problems in the
+    # same sequence -- which matters once a wall-clock stop-loss decides where the
+    # ILP stops and the greedy starts.
+    keyed = sorted((-sum(len(units[i].cands) for i in idxs), idxs[0], idxs) for idxs in groups.values())
+    return [[units[i] for i in idxs] for _, _, idxs in keyed]
+
+
+def greedy_component(units, parent_of, contested, n, seed, tag):
+    """Deterministic fallback for a component the ILP cannot be run on.
+
+    Positives before candidate_network pairs -- the objective's one hard priority --
+    and a seeded shuffle within each kind, which interleaves the three splits so no
+    split gets first refusal on every contested parent. Ordering by split size
+    instead would hand the largest split every contested parent it can use rather
+    than its share of them.
+
+    Each unit then picks from the candidates whose parents no *other* split has
+    claimed yet, and claims what it took. Claims stay local to the component because
+    component_partition puts every unit touching a given contested parent in one
+    component.
+
+    One split per parent protein is preserved exactly; what is lost is optimality,
+    which is the whole reason the ILP exists -- so every call must be counted and
+    reported, never silently substituted.
+    """
+    rng = random.Random(f"{seed}:greedy:{tag}")
+    order = []
+    for kind in ("pos", "cand"):
+        group = [u for u in units if u.kind == kind]
+        rng.shuffle(group)
+        order += group
+
+    claimed = {}
+    for u in order:
+        usable = [
+            (a, b)
+            for a, b in u.cands
+            if claimed.get(parent_of[a], u.split) == u.split and claimed.get(parent_of[b], u.split) == u.split
+        ]
+        # Seeded from the unit itself, like the decoupled path, so a unit's own
+        # choice among what is still available does not depend on the shuffle.
+        pick_rng = random.Random(f"{seed}:greedy:{u.kind}:{u.split}:{u.fam1}:{u.fam2}")
+        u.picked = sorted(diverse_pick(usable, min(n, len(usable)), parent_of, pick_rng))
+        for a, b in u.picked:
+            for p in (parent_of[a], parent_of[b]):
+                if p in contested:
+                    claimed[p] = u.split
+
+
+def run_selection(units, parent_of, contested, n, lam, max_sec, max_cand, ctx):
+    """Solve every component, with a candidate cap and a wall-clock stop-loss.
+
+    The time budget is shared out in proportion to each component's candidate
+    count, recomputed against what is left after each one, so a component that
+    finishes early hands its unused seconds to the rest. Once the budget is spent
+    the remaining components go to the greedy rather than the task overrunning its
+    allocation -- at real DDI counts --max-sec (params.ddi_select_max_sec) is the
+    knob to raise if that starts happening.
+
+    Returns the numbers the DDI Selection ILP MultiQC table reports.
+    """
+    comps = component_partition(units, parent_of, contested)
+    sizes = [sum(len(u.cands) for u in c) for c in comps]
+    n_units = [len(c) for c in comps]
+    print(
+        f"  {len(comps):,} independent component(s); units min/median/max "
+        f"{min(n_units):,}/{statistics.median(n_units):,.0f}/{max(n_units):,}, candidates "
+        f"{min(sizes):,}/{statistics.median(sizes):,.0f}/{max(sizes):,}. Largest: "
+        f"{sizes[0]:,} candidates over {n_units[0]:,} units.",
+        file=sys.stderr,
+    )
+
+    started = time.monotonic()
+    fallback, fallback_units, remaining_cand = 0, 0, sum(sizes)
+    for ci, comp in enumerate(comps):
+        elapsed = time.monotonic() - started
+        kind, reason = None, None
+        if sizes[ci] > max_cand:
+            kind = "candidate cap"
+            reason = f"{sizes[ci]:,} candidates is over --max-ilp-candidates ({max_cand:,})"
+        elif elapsed >= max_sec:
+            kind = "time budget"
+            reason = f"the {max_sec}s ILP budget ran out after {ci:,} of {len(comps):,} components"
+        if kind is None:
+            share = (max_sec - elapsed) * sizes[ci] / remaining_cand if remaining_cand else max_sec
+            if not solve_selection(comp, parent_of, contested, n, lam, share, ctx):
+                kind = "no solution"
+                reason = "the solver returned no usable solution"
+        remaining_cand -= sizes[ci]
+        if kind is not None:
+            fallback += 1
+            fallback_units += len(comp)
+            _warn_once(
+                f"WARNING: at least one component fell back to the greedy selection ({reason}). "
+                f"One split per parent protein still holds, but that component's selection is no "
+                f"longer optimal. The DDI Example Selection ILP MultiQC table reports the total.",
+                key=f"fallback:{kind}",
+            )
+            greedy_component(comp, parent_of, contested, n, ctx.seed, str(ci))
+
+    info = {
+        "units": len(units),
+        "components": len(comps),
+        "largest_units": n_units[0],
+        "largest_cands": sizes[0],
+        "fallback": fallback,
+        "fallback_units": fallback_units,
+        "timeouts": ctx.timeouts,
+        "seconds": time.monotonic() - started,
+    }
+    print(
+        f"  ILP done in {info['seconds']:,.1f}s over {ctx.stages:,} stage solves "
+        f"({info['timeouts']:,} hit their time limit); {fallback:,} component(s) "
+        f"covering {fallback_units:,} units fell back to the greedy.",
+        file=sys.stderr,
+    )
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -381,8 +672,14 @@ def partition_reserve(unclaimed, weights, seed, allow_shared):
     return out
 
 
-def write_mqc(stats, id_):
-    """Two MultiQC sections: the per-split DDI outcome bar and a stats table."""
+def write_mqc(stats, ilp, id_):
+    """Three MultiQC sections: the per-split DDI outcome bar, a per-split stats
+    table, and one row per dataset describing the selection ILP itself.
+
+    The ILP numbers are deliberately not columns on the per-split table: a
+    component is cut over contested parents, which span splits by definition, so
+    there is no per-split value to report there.
+    """
     with open("select_examples_bar_mqc.tsv", "w") as fh:
         fh.write(
             f"# id: 'ddi_examples_bar_{id_}'\n"
@@ -425,6 +722,32 @@ def write_mqc(stats, id_):
                 f"{per:.2f}\t{st['universe']}\t{st['contested']}\t{st['shortlisted']}\t"
                 f"{st['cand_pairs']}\t{st['cand_examples']}\n"
             )
+
+    with open("select_examples_ilp_mqc.tsv", "w") as fh:
+        fh.write(
+            # Its own section per dataset, exactly like the two tables above: custom
+            # content sharing an id across files would have to be merged by MultiQC,
+            # and a section that fails to parse costs the whole report, not one table.
+            f"# id: 'ddi_examples_ilp_{id_}'\n"
+            f"# section_name: 'DDI Example Selection ILP: {id_}'\n"
+            "# description: 'Shape of the selection ILP, one row per dataset. Units are the "
+            "interactions left after the reduction that settles anything touching no contested "
+            "parent locally; those are cut into independent components over the contested parents "
+            "they share, and each component is solved on its own. A component that exceeds "
+            "--max-ilp-candidates, or that is reached after the time budget is spent, falls back to "
+            "a deterministic greedy: one split per parent protein still holds there, but that "
+            "component is no longer optimal, so a nonzero fallback count is worth acting on.'\n"
+            "# plot_type: 'table'\n"
+            "# pconfig:\n"
+            f"#     id: 'ddi_examples_ilp_table_{id_}'\n"
+            f"#     title: 'DDI Example Selection ILP ({id_})'\n"
+            "Sample\tUnits in ILP\tComponents\tLargest component (units)\tLargest component (candidates)\t"
+            "Greedy fallback components\tGreedy fallback units\tStages at time limit\tILP seconds\n"
+        )
+        fh.write(
+            f"{id_}\t{ilp['units']}\t{ilp['components']}\t{ilp['largest_units']}\t{ilp['largest_cands']}\t"
+            f"{ilp['fallback']}\t{ilp['fallback_units']}\t{ilp['timeouts']}\t{ilp['seconds']:.1f}\n"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +798,23 @@ def main():
         "leak: holding parents to one split each there would repair part of that leak and blunt "
         "the very comparison the naive baseline exists to make.",
     )
-    ap.add_argument("--max-sec", type=int, default=300, help="total ILP time budget in seconds (default 300)")
+    ap.add_argument(
+        "--max-sec",
+        type=int,
+        default=300,
+        help="total ILP time budget in seconds (default 300), shared out across the components in "
+        "proportion to their candidate counts. Components reached after it is spent fall back to "
+        "the greedy, so raise it rather than let that happen at scale.",
+    )
+    ap.add_argument(
+        "--max-ilp-candidates",
+        type=int,
+        default=200000,
+        help="skip the ILP for any component with more candidate pairs than this and use the "
+        "deterministic greedy instead (default 200000). A guard against a single component that "
+        "would exhaust memory during canonicalisation; the fallback keeps one split per parent "
+        "protein, it only loses optimality.",
+    )
     ap.add_argument("--solver", default=None, help="CVXPY solver name, e.g. GUROBI, SCIP (default: auto)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
@@ -579,18 +918,22 @@ def main():
         rng = random.Random(f"{args.seed}:free:{u.kind}:{u.split}:{u.fam1}:{u.fam2}")
         u.picked = sorted(diverse_pick(u.cands, min(n, len(u.cands)), parent_of, rng))
 
+    ilp = dict.fromkeys(
+        ("units", "components", "largest_units", "largest_cands", "fallback", "fallback_units", "timeouts"), 0
+    )
+    ilp["seconds"] = 0.0
     if ilp_units:
         print("Solving the selection ILP …", file=sys.stderr)
-        solve_selection(
+        ctx = SolveContext(solver=args.solver, seed=args.seed, verbose=args.verbose, env=make_solver_env(args.solver))
+        ilp = run_selection(
             ilp_units,
             parent_of,
             contested,
             n,
             args.lambda_diversity,
             args.max_sec,
-            args.solver,
-            args.seed,
-            args.verbose,
+            args.max_ilp_candidates,
+            ctx,
         )
     else:
         why = "--allow-shared-parents" if args.allow_shared_parents else "no contested parent protein"
@@ -685,7 +1028,7 @@ def main():
         file=sys.stderr,
     )
 
-    write_mqc(stats, args.id)
+    write_mqc(stats, ilp, args.id)
 
 
 if __name__ == "__main__":

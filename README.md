@@ -107,7 +107,7 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 
 **REMOVE_REDUNDANT** — Removes proteins from val and test that are too similar to any training protein using the CD-HIT 2D TSVs. Only runs for `kahip`/`ilp` splits. Its kept-vs-removed counts feed into the same "PPI Partitioning" chart `SORT_PPIS`/`SOLVE_ILP` started (stacked `Kept` vs `Removed (CD-HIT)` for the `train`/`val`/`test` bars). In DDI mode the verdict is taken one level up and strictly: a family survives only if *every* one of its instances in that split survived, and dropping a family drops every DDI touching it.
 
-**SELECT_EXAMPLES** — DDI mode only. Picks up to `N` domain-instance pairs ("examples") per surviving DDI under one rule: **no parent protein may be used by more than one split**. That rule couples the splits — claiming a protein for train takes it away from test — so it is solved as one ILP (CVXPY) over all three splits at once, and only over the proteins two splits actually compete for; the rest is a local pick. Candidate pairs are any instance of family A × any instance of family B, preferring distinct parents over reusing one, and `candidate_network` pairs claim their parents in the same ILP. Emits the per-split example tables, each split's **protein universe** (the parents it claimed), the proteins no candidate ever reached (`unclaimed.txt`, plus a `{split}_reserve.txt` share of them per split, weighted by the DDIs that split kept), the DDI lists with zero-example DDIs removed, and a drop report.
+**SELECT_EXAMPLES** — DDI mode only. Picks up to `N` domain-instance pairs ("examples") per surviving DDI under one rule: **no parent protein may be used by more than one split**. That rule couples the splits — claiming a protein for train takes it away from test — so it is solved as an ILP (CVXPY) over all three splits at once, and only over the proteins two splits actually compete for; the rest is a local pick. What is left is then cut into connected components over the contested proteins they share and each component solved on its own, which is exact — units sharing no contested protein share no constraint and no objective term — and is what keeps the model tractable at real DDI counts. A component too large for `ddi_max_ilp_candidates`, or reached after `ddi_select_max_sec` is spent, falls back to a deterministic greedy that still applies the one-split-per-protein rule exactly and loses only optimality; the **DDI Example Selection ILP** MultiQC table reports the component count, the largest component, and any fallback. Candidate pairs are any instance of family A × any instance of family B, preferring distinct parents over reusing one, and `candidate_network` pairs claim their parents in the same ILP. Emits the per-split example tables, each split's **protein universe** (the parents it claimed), the proteins no candidate ever reached (`unclaimed.txt`, plus a `{split}_reserve.txt` share of them per split, weighted by the DDIs that split kept), the DDI lists with zero-example DDIs removed, and a drop report.
 
 **SAMPLE_NEGATIVES_DEGREE** — Samples random negative pairs for each split. By default, negatives are drawn such that each protein's degree distribution is approximately preserved, producing a balanced test set (1:1 positive:negative) and a realistic test set (1:10 ratio). With `negative_sampling_method=uniform`, endpoints are instead drawn fully uniformly at random for *every* split (not just the realistic test set) — see [Naive baseline: the topology shortcut](#naive-baseline-the-topology-shortcut-optional) below.
 
@@ -358,6 +358,17 @@ Instance ids are `family_protein_start_end`, e.g. `PF00069_P12345_10_250`, and
 `data/instances.tsv` maps each one back to its family, clan, parent protein,
 coordinates, taxon and source database.
 
+`ddi_examples_pool_factor` is the single biggest cost driver in DDI mode, and not
+only in `SELECT_EXAMPLES`. Raising it multiplies the instances per family, so
+`FETCH_DOMAIN_META`'s reservoirs and `EMBED_SEQUENCES` grow linearly, `RUN_BLAST`
+grows quadratically, and — because a protein carrying domains in two splits is
+what makes it contested — the selection ILP's components grow denser. Its one
+saving grace is that the per-DDI candidate pool stays capped at
+`ddi_shortlist_factor` × `N`. Raise it one step at a time and check
+`SELECT_EXAMPLES`'s component table and `RUN_BLAST`'s runtime each time; the
+reserve of never-claimed proteins is also inert at factor 1 and live above it, so
+factor ≥ 2 exercises code that factor 1 cannot reach.
+
 ### Parameters
 
 | Parameter                  | Default | Description                                                                                                                                     |
@@ -365,7 +376,8 @@ coordinates, taxon and source database.
 | `ddi_mode`                 | `false` | Interpret the interaction file's two columns as Pfam family accessions                                                                          |
 | `ddi_examples_target`      | `5`     | `N`, the cap on examples kept per DDI                                                                                                           |
 | `ddi_examples_pool_factor` | `1`     | `M` = this × `N`, the instances sampled per family                                                                                              |
-| `ddi_select_max_sec`       | `300`   | Time limit for the `SELECT_EXAMPLES` ILP; on running out it keeps the best solution found and warns                                             |
+| `ddi_select_max_sec`       | `300`   | Total `SELECT_EXAMPLES` ILP budget, shared across the independent components in proportion to their size. A stage that runs out keeps the best solution found; components reached after the whole budget is gone go to the greedy fallback. Both are warned and counted |
+| `ddi_max_ilp_candidates`   | `200000`| A component with more candidate pairs than this skips the ILP for the greedy fallback, so one oversized component cannot exhaust memory during canonicalisation |
 | `ddi_lambda_diversity`     | `0.1`   | How strongly a DDI's examples prefer distinct parents (`P1-P2, P3-P4` over `P1-P2, P1-P3`). Must stay below 0.5, so it never costs a DDI an example |
 | `ddi_shortlist_factor`     | `4`     | Cap on a DDI's candidate pool before the ILP, as a multiple of `N`. A no-op at `M = N`, a guard for a larger pool                               |
 | `ddi_candidate_factor`     | `4`     | Cap on `candidate_network` pairs per split, as a multiple of that split's DDI count                                                             |
@@ -405,9 +417,13 @@ DDI mode — neither takes a flag for it.
 ### Reading the report
 
 The MultiQC report gains "DDI Partitioning", "DDI Example Selection", "DDI
-Instance Expansion" and "DDI Attrition" — the last a single stacked bar per
-dataset accounting for every input DDI (discarded cross-cluster, removed by
-CD-HIT-2D, dropped for want of an example, or kept). Each test split gets two
+Example Selection ILP", "DDI Instance Expansion" and "DDI Attrition" — the last a
+single stacked bar per dataset accounting for every input DDI (discarded
+cross-cluster, removed by CD-HIT-2D, dropped for want of an example, or kept).
+"DDI Example Selection ILP" describes the solve itself; the two numbers to check
+there are **Greedy fallback components**, which should be 0, and **Largest
+component (candidates)**, which is what decides whether the decomposition is
+still doing its job as the input grows. Each test split gets two
 classifier tables, one per example and one per DDI, the latter averaging a DDI's
 example predictions before scoring. On the per-DDI table read **AUROC and
 AUPRC**: averaging `N` near-chance probabilities pulls every DDI toward the same

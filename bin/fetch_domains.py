@@ -253,9 +253,14 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed):
     than flushed at each family boundary. Family blocks are contiguous in
     practice (141 blocks for 141 families in an 84 MB sample), so flushing
     would bound live memory tighter -- but holding them costs at most
-    |families| x 4 x pool_size records (~150 MB at full Pfam with M = 5) and
-    makes the result correct even if the file ever stops being contiguous,
-    rather than silently truncating a family to its first block.
+    |families| x 4 x pool_size records and makes the result correct even if the
+    file ever stops being contiguous, rather than silently truncating a family to
+    its first block.
+
+    That bound is linear in pool_size, i.e. in --ddi_examples_pool_factor: ~150 MB
+    at full Pfam with M = 5, so ~450 MB at the M = 15 the factor-3 configuration
+    asks for. Check FETCH_DOMAIN_META's memory in nextflow.config before raising
+    the factor.
     """
     reservoirs = {}
     stats = Counter()

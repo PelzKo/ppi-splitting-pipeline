@@ -2,6 +2,7 @@
 """Shared I/O utilities for PPI pipeline scripts."""
 
 import csv
+import heapq
 import sys
 from collections import defaultdict
 
@@ -158,22 +159,52 @@ def diverse_pick(pairs, k, parent_of, rng):
     Realises the design's diversity preference -- P1-P2, P3-P4, P5-P6 over
     P1-P2, P1-P3, P1-P4 -- and doubles as SELECT_EXAMPLES' shortlist trimmer.
     Deterministic given `rng`.
+
+    Each pick takes the lowest (reuse score, shuffled index), where the score is
+    used[parent_a] + used[parent_b]. A plain min() over the remaining pool costs
+    O(k * n) with two dict lookups per comparison, which is 20 * 225 comparisons
+    per DDI at --ddi_examples_pool_factor 3 and, over ~90k units, minutes of
+    single-threaded Python before the solver starts. A pick only changes the score
+    of pairs sharing one of the two parents just used, so the scan is replaced by a
+    lazy heap: push a pair's score when it changes, skip entries whose score is
+    stale on pop. Scores only ever rise, so a stale entry always sorts before its
+    replacement and is discarded rather than hiding it -- the (score, index)
+    ordering, and therefore the output, is identical to the min() scan at
+    O((n + k * touched) log n).
     """
     if k <= 0 or not pairs:
         return []
     order = sorted(pairs)
     rng.shuffle(order)
-    used, chosen, remaining = defaultdict(int), [], set(range(len(order)))
-    while len(chosen) < k and remaining:
-        best = min(
-            remaining,
-            key=lambda i: (used[parent_of[order[i][0]]] + used[parent_of[order[i][1]]], i),
-        )
-        remaining.discard(best)
-        a, b = order[best]
+
+    touching = defaultdict(list)
+    for i, (a, b) in enumerate(order):
+        pa, pb = parent_of[a], parent_of[b]
+        touching[pa].append(i)
+        if pb != pa:
+            touching[pb].append(i)
+
+    score = [0] * len(order)
+    taken = [False] * len(order)
+    heap = [(0, i) for i in range(len(order))]  # already in heap order
+    used, chosen = defaultdict(int), []
+    while len(chosen) < k and heap:
+        s, i = heapq.heappop(heap)
+        if taken[i] or s != score[i]:
+            continue
+        taken[i] = True
+        a, b = order[i]
+        chosen.append(order[i])
+        # A pair whose two instances share a parent spends that parent twice,
+        # which is the double reuse it is -- so increment per endpoint, not per
+        # distinct parent.
         used[parent_of[a]] += 1
         used[parent_of[b]] += 1
-        chosen.append(order[best])
+        for p in {parent_of[a], parent_of[b]}:
+            for j in touching[p]:
+                if not taken[j]:
+                    score[j] = used[parent_of[order[j][0]]] + used[parent_of[order[j][1]]]
+                    heapq.heappush(heap, (score[j], j))
     return chosen
 
 
