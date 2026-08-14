@@ -15,10 +15,12 @@ process EMBED_SEQUENCES {
     tuple val(embedding_model), path("embeddings.npz")
 
     script:
+    def gpu_arg = workflow.profile.tokenize(',')*.trim().contains('gpu') ? '--require-gpu' : ''
     """
     embed_sequences.py \\
         --fasta ${fasta_files} \\
-        --model ${embedding_model}
+        --model ${embedding_model} \\
+        ${gpu_arg}
     """
 }
 

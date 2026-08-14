@@ -48,6 +48,10 @@ You provide all parameters for the pipeline via a samplesheet CSV where one row 
 ### Run the pipeline
 
 If you have a GPU, `-profile gpu` will submit the embedding step to a GPU, as specified by your nextflow config.
+It also makes `EMBED_SEQUENCES` **fail** rather than fall back to CPU when torch finds no usable CUDA
+device — a CPU run is roughly 60× slower and would only hit the scheduler's walltime hours later. The
+usual cause is a torch wheel built for a newer CUDA than the node's driver (`environment.yml` pins a
+cu12x build for this reason). Without `-profile gpu`, CPU is the expected device and the step just warns.
 
 ```
 nextflow run main.nf --samplesheet samplesheet.csv --outdir results -profile gpu -c my_config.config
@@ -124,7 +128,9 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 Every samplesheet dataset requesting the same model is embedded together in
 one call over the union of their train/val/test sequences, published once to
 `results/_shared/embeddings/embeddings_<model>.npz` (not duplicated per
-dataset).
+dataset). The two neural models run in batches, grouped longest-first under a
+padded-token budget (`--batch-tokens`, `--max-batch` in `bin/embed_sequences.py`);
+sequences over 1024 residues are truncated, as they were one at a time.
 
 **TRAIN_CLASSIFIER** — Trains a Random Forest classifier on concatenated pair embeddings. Hyperparameters are tuned on the validation AUROC over 3 configurations (max_depth 5/10/30, max_samples 0.2), then the best model is retrained on train+val and evaluated on the balanced and realistic test sets. When the labelled CSVs carry the DDI mode `family1`/`family2` columns it additionally averages each DDI's example predictions and scores at family level, in a second table per test split ("Classifier Performance, DDI level"). Hyperparameter selection stays on example-level validation AUROC in both modes.
 
@@ -596,5 +602,5 @@ This fits a Ridge regressor (on positive pairs only) to predict each STRING evid
 - [Nextflow](https://www.nextflow.io/) ≥ 23.10
 - Conda (for the environment) — or install the packages in `environment.yml` manually
 - Internet access for the initial UniProt fetch (subsequent runs use cached Nextflow work directories)
-- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models
+- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. `environment.yml` pins a cu12x torch build; a driver newer than CUDA 12.x needs that pin raised, since the wheel's CUDA major version must not exceed the driver's
 - For DDI mode, internet access for the Pfam pass — one ~6.3 GB transfer per run, or none if `--pfam_fasta`/`--pfam_clans` point at local copies. `--interpro_cache <abs-dir>` makes repeat runs a stat and a read (plus one small `Pfam.version` request, which `--pfam_release` removes)
