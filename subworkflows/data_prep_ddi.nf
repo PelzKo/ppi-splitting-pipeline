@@ -12,30 +12,30 @@ include { EMPTY_GO_ANNOTATIONS; FETCH_DOMAIN_META; GET_LENGTHS as GET_LENGTHS_DD
 // pipeline. `instances` is the one addition; DATA_PREP emits it as [].
 workflow DATA_PREP_DDI {
     take:
-    datasets_ch  // tuple(meta, ddis, sequences, species, domain_instances)
+    datasets_ch  // tuple(meta, files) -- reads files.ppis (Pfam family accessions here), .sequences, .species, .domain_instances
 
     main:
     // The precomputed hatch is all-or-nothing, so a row that supplies two of the
     // three files would fall into needs_fetch, ignore both, and stream 6.3 GB
     // from EBI -- a correct result by a route nobody asked for, hours later and
     // silently. Fail loudly instead, wording it like main.nf's --split_only check.
-    checked_ch = datasets_ch.map { meta, ddis, sequences, species, domain_instances ->
-        def supplied = [sequences: sequences, species: species, domain_instances: domain_instances]
+    checked_ch = datasets_ch.map { meta, f ->
+        def supplied = [sequences: f.sequences, species: f.species, domain_instances: f.domain_instances]
         def missing  = supplied.findAll { k, v -> !v }.keySet()
         if (missing && missing.size() < supplied.size()) {
             error("--ddi_mode precomputed data prep needs sequences, species and domain_instances together (row '${meta.id}' supplies ${(supplied.keySet() - missing).join(', ')} but is missing ${missing.join(', ')}). Leave all three blank to fetch them from Pfam instead.")
         }
-        tuple(meta, ddis, sequences, species, domain_instances)
+        tuple(meta, f)
     }
 
     // GO annotations are not part of this mode (they describe proteins, not
     // domain families), so unlike DATA_PREP's three-way gate the precomputed
     // hatch asks only for the files that cannot be derived.
-    branched = checked_ch.branch { meta, ddis, sequences, species, domain_instances ->
-        precomputed: sequences && species && domain_instances
-            return tuple(meta, sequences, species, domain_instances)
+    branched = checked_ch.branch { meta, f ->
+        precomputed: f.sequences && f.species && f.domain_instances
+            return tuple(meta, f.sequences, f.species, f.domain_instances)
         needs_fetch: true
-            return tuple(meta, ddis)
+            return tuple(meta, f.ppis)
     }
 
     precomputed_sequences = branched.precomputed.map { meta, sequences, species, domain_instances -> tuple(meta, sequences) }

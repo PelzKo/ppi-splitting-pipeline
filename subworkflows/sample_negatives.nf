@@ -78,9 +78,11 @@ workflow SAMPLE_NEGATIVES {
         exp_out      = EXPAND_NEGATIVES(exp_inputs)
         neg_labelled = exp_out.labelled
         neg_mqc      = fam_mqc.mix(exp_out.mqc)
+        inst_labelled = exp_out.labelled
     } else {
         neg_labelled = fam_labelled
         neg_mqc      = fam_mqc
+        inst_labelled = channel.empty()
     }
 
     neg_branched = neg_labelled.branch {
@@ -91,10 +93,19 @@ workflow SAMPLE_NEGATIVES {
             test_realistic: label == "test_realistic"
     }
 
+    // The four per-split emits below are what TRAIN_BASELINE and QC consume; the
+    // two `labelled*` ones exist for a pipeline that includes PPI_SPLITTING and
+    // wants every split in one channel, keyed by negative set. The negative set is
+    // its own tuple field, never folded into meta -- adding it there would rekey
+    // every join()/combine(by: 0) against the fasta/species/instances channels and
+    // silently empty them. One method per row today, so the field is that method.
+
     emit:
     train          = neg_branched.train.map          { meta, label, f -> tuple(meta, f) }
     val            = neg_branched.val.map            { meta, label, f -> tuple(meta, f) }
     test_balanced  = neg_branched.test_balanced.map  { meta, label, f -> tuple(meta, f) }
     test_realistic = neg_branched.test_realistic.map { meta, label, f -> tuple(meta, f) }
     mqc            = neg_mqc
+    labelled       = fam_labelled.map  { meta, label, f -> tuple(meta, meta.negative_sampling_method, label, f) }
+    labelled_inst  = inst_labelled.map { meta, label, f -> tuple(meta, meta.negative_sampling_method, label, f) }
 }

@@ -134,7 +134,17 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
     cross_counts = np.array([cross_ppi[i, j] for i, j in loss_pairs])  # actual PPI counts
 
     if loss_pairs:
-        z = cp.Variable((n_splits, len(loss_pairs)), boolean=True)
+        # z is continuous on purpose. x is the only variable that must be integral;
+        # the four McCormick rows below then pin z to the exact product without any
+        # integrality declaration of its own: x_i=x_j=1 gives 1 ≤ z ≤ 1, and either
+        # of them 0 gives 0 ≤ z ≤ 0. Declaring z boolean instead adds one redundant
+        # integer variable per (split, pair) for the solver to branch on -- measured
+        # at 5,763 of 6,063 variables (95 %) on a 100-cluster / 1,921-pair DDI run,
+        # which is why SOLVE_ILP hit ilp_max_sec = 7200 and returned an unproven
+        # incumbent. z ≤ x_i ≤ 1 already caps z at 1, so the LP relaxation -- and
+        # therefore the bound and the optimum -- is unchanged; only the
+        # branch-and-bound tree shrinks. See docs/ddi-review-plan.md §3.9.
+        z = cp.Variable((n_splits, len(loss_pairs)), nonneg=True)
         for k, (i, j) in enumerate(loss_pairs):
             for s in range(n_splits):
                 constraints += [

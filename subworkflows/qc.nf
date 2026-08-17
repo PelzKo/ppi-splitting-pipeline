@@ -99,5 +99,10 @@ workflow QC {
         .map { id, f -> f }
         .collect()
 
-    MULTIQC(mqc_files)
+    multiqc = MULTIQC(mqc_files)
+
+    emit:
+    // Emitted rather than only published, so a pipeline including PPI_SPLITTING can
+    // re-publish it under its own name and location without knowing this one's.
+    multiqc_report = multiqc.report
 }

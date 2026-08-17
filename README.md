@@ -597,10 +597,86 @@ This fits a Ridge regressor (on positive pairs only) to predict each STRING evid
 
 ---
 
+## Embedding this pipeline in another Nextflow pipeline
+
+The whole pipeline is the named workflow `PPI_SPLITTING` in `main.nf`; the anonymous
+`workflow { }` entry is a thin caller that builds the dataset channel from
+`--samplesheet` and nothing else. An including pipeline therefore skips the
+samplesheet entirely and builds the channel itself:
+
+```groovy
+include { PPI_SPLITTING } from './subworkflows/external/ppi-splitting/main.nf'
+
+// tuple(meta, filesMap) -- one item per dataset
+datasets_ch = channel.of(
+    tuple(
+        [ id: 'minimal_leakage', split_method: 'ilp', negative_sampling_method: 'ilp',
+          train_split: 0.7, val_split: 0.1, test_split: 0.2, /* ...every other meta key... */ ],
+        [ ppis: file('3did.csv'), sequences: file('sequences.fasta'),
+          species: file('species.tsv'), domain_instances: file('instances.tsv'),
+          go_annotations: [], blast_results: [], candidate_network: [],
+          partition: [], node_mapping: [] ]
+    )
+)
+
+out = PPI_SPLITTING(datasets_ch)
+```
+
+Three things to get right:
+
+1. **`meta` must carry every key** `buildDatasetsChannel()` sets — the subworkflows
+   read `meta.split_method`, `meta.cdhit_identity` and the rest directly, and a
+   missing key surfaces as a null in a rendered command line, not as an error.
+   `meta` must also not be mutated afterwards: every `join()`/`combine(by: 0)` in
+   the pipeline keys on the whole map.
+2. **`filesMap` must have all nine keys.** An absent optional file is `[]`, never
+   `null` — a `path` input accepts `[]` as "no file" and `null` breaks staging.
+3. **Include `conf/params.config`**, before your own `params { }` block:
+
+   ```groovy
+   includeConfig 'subworkflows/external/ppi-splitting/conf/params.config'
+   ```
+
+   Nextflow reads only the root project's `nextflow.config`, so without this every
+   `params.*` this pipeline reads is undefined. Order matters because a later
+   assignment wins and `outdir` is defined on both sides (`seed` too, with the same
+   meaning). Those two are the only collisions.
+
+### What it emits
+
+| emit | shape |
+|---|---|
+| `instances` | `tuple(meta, instances.tsv)` — `tuple(meta, [])` in PPI mode |
+| `sequences` | `tuple(meta, sequences.fasta)` |
+| `labelled` | `tuple(meta, negset, label, csv)` — labelled pairs at node level (Pfam family in DDI mode) |
+| `labelled_inst` | the same at domain-instance level; empty in PPI mode |
+| `multiqc_report` | `multiqc_report.html`; empty under `--split_only` |
+
+`negset` is the negative-sampling method the row asked for, carried as its own
+tuple field rather than inside `meta`. `label` is one of `train`, `val`,
+`test_balanced`, `test_realistic`. There is no `versions` channel — this pipeline
+does not capture tool versions anywhere.
+
+Everything is still published to `--outdir` exactly as in a standalone run; the
+emits exist so an including pipeline can ingest or re-publish without knowing this
+pipeline's layout.
+
+### Which profile
+
+Use **`-profile docker`**. Nextflow puts only the *root* project's `bin/` on
+`PATH`, and when this pipeline is included the root project is yours, so
+`sample_negatives.py` and friends would not resolve. The image bakes `bin/` in, so
+processes work identically standalone and embedded — which is also why **the image
+tag and the submodule tag have to move together**: a `bin/` change with a stale
+image is a silently wrong run, not a failure. `-profile conda` is supported for
+standalone runs only, for exactly that `$projectDir/bin` reason.
+
+---
+
 ## Requirements
 
 - [Nextflow](https://www.nextflow.io/) ≥ 23.10
-- Conda (for the environment) — or install the packages in `environment.yml` manually
+- Conda (for the environment) — or install the packages in `environment.yml` manually, or use `-profile docker` and the image built from `Dockerfile`
 - Internet access for the initial UniProt fetch (subsequent runs use cached Nextflow work directories)
-- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. `environment.yml` pins a cu12x torch build; a driver newer than CUDA 12.x needs that pin raised, since the wheel's CUDA major version must not exceed the driver's
+- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. The wheel's CUDA major version must not exceed the driver's (minors are compatible). `Dockerfile` pins `torch==2.10.0+cu128` for that reason; **`environment.yml` does not pin torch at all**, so a conda env built from it takes whatever pip resolves that day and can reproduce the silent-CPU failure `-profile gpu` exists to catch
 - For DDI mode, internet access for the Pfam pass — one ~6.3 GB transfer per run, or none if `--pfam_fasta`/`--pfam_clans` point at local copies. `--interpro_cache <abs-dir>` makes repeat runs a stat and a read (plus one small `Pfam.version` request, which `--pfam_release` removes)

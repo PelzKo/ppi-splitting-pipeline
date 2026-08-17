@@ -8,14 +8,14 @@ include { FETCH_DATA; GET_LENGTHS; GET_LENGTHS as GET_LENGTHS_SHARED; SUBSET_FET
 // fetched once, then split back out per dataset (SUBSET_FETCHED_DATA).
 workflow DATA_PREP {
     take:
-    datasets_ch  // tuple(meta, ppis, sequences, go_annotations, species, blast_results, candidate_network)
+    datasets_ch  // tuple(meta, files) -- reads files.ppis, .sequences, .go_annotations, .species
 
     main:
-    branched = datasets_ch.branch { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network ->
-        precomputed: sequences && go_annotations && species
-            return tuple(meta, sequences, go_annotations, species)
+    branched = datasets_ch.branch { meta, f ->
+        precomputed: f.sequences && f.go_annotations && f.species
+            return tuple(meta, f.sequences, f.go_annotations, f.species)
         needs_fetch: true
-            return tuple(meta, ppis)
+            return tuple(meta, f.ppis)
     }
 
     // Precomputed datasets: use the supplied files as-is; each still needs
@@ -53,7 +53,7 @@ workflow DATA_PREP {
     // DATA_PREP_DDI emits a real instances.tsv here; PPI mode has none. Emit an
     // explicit placeholder rather than nothing: downstream joins key on meta,
     // and a missing item would drop the whole dataset from the run silently.
-    instances_ch = datasets_ch.map { meta, ppis, sequences, go_annotations, species, blast_results, candidate_network -> tuple(meta, []) }
+    instances_ch = datasets_ch.map { meta, f -> tuple(meta, []) }
 
     emit:
     sequences      = sequences_ch
