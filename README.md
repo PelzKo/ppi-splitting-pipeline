@@ -88,7 +88,7 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 
 **FETCH_DATA** — Queries UniProt for the union of unique proteins across every samplesheet dataset that needs a fetch (extracted directly from each dataset's `protein1`/`protein2` columns and deduplicated, no PPI CSVs concatenated). Retrieves sequences (canonical + isoform-specific via the FASTA endpoint), GO annotations (biological process, molecular function, cellular component), and NCBI taxon IDs. Outputs `sequences.fasta`, `go_annotations.tsv`, and `species.tsv`, published to `results/_shared/data/`, then split back out per dataset (`SUBSET_FETCHED_DATA`) — see [Multiple datasets (samplesheet)](#multiple-datasets-samplesheet) below.
 
-**FETCH_DOMAIN_META** — DDI mode only, replacing `FETCH_DATA`. Pools the Pfam family accessions across every dataset that needs a fetch and resolves them in one streaming pass over Pfam's bulk files, with no per-family API requests: `Pfam-A.fasta.gz` for the domain instances (already cut, so sequence and coordinates come from one release), `Pfam-A.clans.tsv.gz` for family → clan, and `speclist.txt` plus UniProt's reviewed-accession list for the sampling tiers. Samples up to `M` instances per family and writes `sequences.fasta` keyed by instance, `species.tsv`, a header-only `go_annotations.tsv` and `instances.tsv` — published to `results/_shared/data/`, then split back out per dataset (`SUBSET_DOMAIN_DATA`).
+**FETCH_DOMAIN_META** — DDI mode only, replacing `FETCH_DATA`. Pools the Pfam family accessions across every dataset that needs a fetch and resolves them in one streaming pass over Pfam's bulk files, with no per-family API requests: `Pfam-A.fasta.gz` for the domain instances (already cut, so sequence and coordinates come from one release), `Pfam-A.clans.tsv.gz` for family → clan, and `speclist.txt` plus UniProt's reviewed-accession list for the sampling tiers. Samples up to `M` instances per family — restricted to human instances by `--instance_tier human_only` — and writes `sequences.fasta` keyed by instance, `species.tsv`, a header-only `go_annotations.tsv`, `instances.tsv` and `dropped_families.tsv` (every requested family that kept no instance, with the reason) — published to `results/_shared/data/`, then split back out per dataset (`SUBSET_DOMAIN_DATA`).
 
 **GET_LENGTHS** — Computes per-protein sequence lengths for length-normalized BLAST scores. Runs once on the shared fetch batch (see above) for datasets needing a fetch, and once per dataset for datasets supplying a precomputed `sequences.fasta`.
 
@@ -177,6 +177,7 @@ results/
 ├── _shared/
 │   ├── data/                         # One deduplicated UniProt fetch batch (see Multiple datasets below)
 │   │   └── sequences.fasta, go_annotations.tsv, species.tsv
+│   │   └── instances.tsv, dropped_families.tsv   # DDI mode only (see --ddi_mode)
 │   └── embeddings/
 │       └── embeddings_<model>.npz    # One file per distinct embedding_model requested across datasets
 ├── multiqc/
@@ -355,7 +356,8 @@ network involved. Two counts govern that:
 - **`M`** = `ddi_examples_pool_factor` × `N` instances sampled per family, in tier
   order (human-reviewed → human → reviewed → any, at random within a tier). This
   is all that BLAST, CD-HIT and the classifier ever see of a family. An empty tier
-  is ordinary, not an error.
+  is ordinary, not an error. `--instance_tier human_only` makes the last two tiers
+  *ineligible* rather than merely least preferred (below).
 - **`N`** = `ddi_examples_target` examples kept per DDI — a cap, not a quota. A
   DDI with fewer available keeps what it has; only one left with *zero* is
   dropped, and reported.
@@ -375,19 +377,58 @@ saving grace is that the per-DDI candidate pool stays capped at
 reserve of never-claimed proteins is also inert at factor 1 and live above it, so
 factor ≥ 2 exercises code that factor 1 cannot reach.
 
+### Restricting instances to human: `--instance_tier human_only`
+
+By default (`any`) the four strata are a *preference* order: a family with no
+human instance simply falls through to reviewed and then to anything. With
+`--instance_tier human_only` the two non-human strata become **ineligible**, and
+the consequence is the point of the option rather than a side effect:
+
+- A family whose Pfam instances are all non-human keeps **zero** instances. Every
+  DDI touching it then has no instance pair to represent it and drops out of the
+  run. This is never an error and never aborts.
+- Every family that *does* keep instances keeps exactly the instances it would
+  have kept under `any` — the cascade fills top-down with the same room and each
+  reservoir carries its own seed, so gating the lower strata cannot perturb the
+  upper ones. `human_only`'s `instances.tsv` is the human subset of `any`'s, row
+  for row.
+- Both tiers get their own cache entry: the tier is part of
+  `--interpro_cache`'s key, so a warm `any` cache cannot serve a `human_only` run.
+
+`FETCH_DOMAIN_META` always writes **`_shared/data/dropped_families.tsv`**
+(`family`, `reason`), one row per requested family that kept no instance:
+
+| `reason` | meaning |
+|---|---|
+| `no_eligible_instances` | Pfam has the family, but nothing in a tier `--instance_tier` allows. Under `human_only` this is the expected bulk; under `any` it should be empty |
+| `dead` | the accession is listed in `Pfam-A.dead` |
+| `not_in_pfam` | no instances in `Pfam-A.fasta` and not listed as dead — usually a typo in the input |
+
+The three are counted and warned separately on `FETCH_DOMAIN_META`'s stderr, so a
+large `human_only` drop cannot hide among dead accessions. Note this compounds
+with `ddi_examples_pool_factor`: asking for `M = 25` instances from human strata
+alone will underfill most families, and fewer instances per family is *good* for
+val/test survival (see the factor's effect above) but leaves smaller pools for
+`SELECT_EXAMPLES`.
+
+`species.tsv` and the `same_species` bias attribute are deliberately untouched —
+under `human_only` that attribute goes constant and its NMI to ~0, which is the
+intended sanity signal rather than something to suppress.
+
 ### Parameters
 
 | Parameter                  | Default | Description                                                                                                                                     |
 |----------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ddi_mode`                 | `false` | Interpret the interaction file's two columns as Pfam family accessions                                                                          |
 | `ddi_examples_target`      | `5`     | `N`, the cap on examples kept per DDI                                                                                                           |
-| `ddi_examples_pool_factor` | `1`     | `M` = this × `N`, the instances sampled per family                                                                                              |
+| `ddi_examples_pool_factor` | `5`     | `M` = this × `N`, the instances sampled per family                                                                                              |
 | `ddi_select_max_sec`       | `300`   | Total `SELECT_EXAMPLES` ILP budget, shared across the independent components in proportion to their size. A stage that runs out keeps the best solution found; components reached after the whole budget is gone go to the greedy fallback. Both are warned and counted |
 | `ddi_max_ilp_candidates`   | `200000`| A component with more candidate pairs than this skips the ILP for the greedy fallback, so one oversized component cannot exhaust memory during canonicalisation |
 | `ddi_lambda_diversity`     | `0.1`   | How strongly a DDI's examples prefer distinct parents (`P1-P2, P3-P4` over `P1-P2, P1-P3`). Must stay below 0.5, so it never costs a DDI an example |
 | `ddi_shortlist_factor`     | `4`     | Cap on a DDI's candidate pool before the ILP, as a multiple of `N`. A no-op at `M = N`, a guard for a larger pool                               |
 | `ddi_candidate_factor`     | `4`     | Cap on `candidate_network` pairs per split, as a multiple of that split's DDI count                                                             |
 | `ddi_select_verbose`       | `false` | Let the `SELECT_EXAMPLES` solver print its own log to `.command.err`. Off by default: one block per ILP solve, which is large at real DDI counts |
+| `instance_tier`            | `any`   | `any` fills the four strata in preference order; `human_only` makes the two non-human strata ineligible, so a family with no human instance keeps zero instances and its DDIs drop out. Reported in `_shared/data/dropped_families.tsv` |
 | `pfam_fasta`               | `null`  | Local `Pfam-A.fasta.gz`, skipping the ~6.3 GB download                                                                                          |
 | `pfam_clans`               | `null`  | Local `Pfam-A.clans.tsv(.gz)`, skipping that download                                                                                           |
 | `pfam_release`             | `null`  | Pin the release string (e.g. `38.2`) instead of downloading `Pfam.version`. That lookup happens before the cache directory is known, so it is the one fetch a warm cache cannot skip |

@@ -5,7 +5,8 @@ In DDI mode the interaction file's protein1/protein2 columns hold Pfam family
 accessions rather than UniProt accessions. This script turns that family list
 into the same four artefacts DATA_PREP produces in PPI mode -- sequences.fasta,
 species.tsv, go_annotations.tsv -- plus instances.tsv, the single table that
-maps every sampled domain instance back to its family, clan and parent protein.
+maps every sampled domain instance back to its family, clan and parent protein,
+and dropped_families.tsv, one row per requested family that kept no instance.
 
 Everything comes from four bulk downloads and one streaming pass, with no
 per-family API requests: the per-family InterPro endpoint costs ~29 s, so the
@@ -78,6 +79,30 @@ DEAD_AC_RE = re.compile(r"^#=GF\s+AC\s+(PF\d+)")
 # the cascade needs no deduplication at the family boundary.
 TIERS = ("human_reviewed", "human", "reviewed", "any")
 N_TIERS = len(TIERS)
+
+# --tier restricts which strata may be filled at all, as opposed to which are
+# preferred. Under "human_only" the two non-human strata are never offered a
+# record, so a family whose instances are all non-human ends with *zero*
+# instances rather than falling back to them -- which is the point: domainsplit
+# ingests these instances into a human-only database and aborts on any other
+# taxon. Because the cascade fills top-down with the same room and every
+# reservoir carries its own seed, the human instances a family keeps under
+# "human_only" are identical to the ones it keeps under "any".
+TIER_ELIGIBILITY = {
+    "any": frozenset(range(N_TIERS)),
+    "human_only": frozenset({0, 1}),
+}
+
+# One row per requested family that reaches zero instances, with the reason.
+# Published rather than made a MultiQC section: the fetch runs once per *run*
+# under the synthetic "_shared" meta, so it could only ever be a run-wide
+# section, and QC does not run at all under --split_only.
+DROPPED_FAMILIES_COLUMNS = ("family", "reason")
+DROP_REASONS = {
+    "no_eligible_instances": "have Pfam records but none in a tier --tier allows",
+    "dead": "are dead in Pfam",
+    "not_in_pfam": "have no instances in Pfam-A.fasta and are not listed as dead",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +268,15 @@ def tier_of(mnemonic, accession, reviewed):
 # ---------------------------------------------------------------------------
 
 
-def sample_instances(stream, wanted, pool_size, reviewed, seed):
-    """One pass over Pfam-A.fasta, returning ({family: [record]}, stats).
+def sample_instances(stream, wanted, pool_size, reviewed, seed, eligible=None):
+    """One pass over Pfam-A.fasta, returning ({family: [record]}, stats, seen_families).
 
     A record is a dict with instance_id, family, protein_id, mnemonic, start,
-    end, tier and sequence.
+    end, tier and sequence. `eligible` is a set of tier indices (see
+    TIER_ELIGIBILITY); records in any other tier are counted and dropped, so a
+    family can appear in `seen_families` and still be absent from the returned
+    mapping. That is what separates "Pfam has no such family" from "Pfam has it
+    but not in a tier we accept" in the drop report.
 
     Reservoirs for every requested family are held for the whole pass rather
     than flushed at each family boundary. Family blocks are contiguous in
@@ -262,6 +291,8 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed):
     asks for. Check FETCH_DOMAIN_META's memory in nextflow.config before raising
     the factor.
     """
+    if eligible is None:
+        eligible = TIER_ELIGIBILITY["any"]
     reservoirs = {}
     stats = Counter()
     seen_families = set()
@@ -304,6 +335,9 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed):
             accession = match["acc"]
             tier = tier_of(mnemonic, accession, reviewed)
             stats[f"tier_{TIERS[tier]}_offered"] += 1
+            if tier not in eligible:
+                stats["ineligible_tier_records"] += 1
+                continue
 
             key = (family, tier)
             res = reservoirs.get(key)
@@ -339,6 +373,9 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed):
     for family in sorted(seen_families):
         rng = random.Random(f"{seed}:{family}:pick")
         chosen, chosen_ids = [], set()
+        # An ineligible tier simply has no reservoir -- the gate above never
+        # created one -- so this loop needs no knowledge of `eligible`, and the
+        # rng is consumed in the same order either way.
         for tier in range(N_TIERS):
             room = pool_size - len(chosen)
             if room <= 0:
@@ -357,7 +394,7 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed):
             for rec in by_family[family]:
                 stats[f"tier_{TIERS[rec['tier']]}_kept"] += 1
 
-    return by_family, stats
+    return by_family, stats, seen_families
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +426,45 @@ def write_instances_tsv(path, by_family, clans, taxa, reviewed):
                         "reviewed" if rec["protein_id"] in reviewed else "unreviewed",
                     ]
                 )
+
+
+def classify_dropped(families, by_family, seen_families, dead):
+    """Return [(family, reason)] for every requested family that kept no instance.
+
+    Three distinct causes, and conflating them would hide the one that is a
+    configuration choice rather than a fact about Pfam: a family absent from the
+    stream is dead or mistyped, while a family *present* in the stream with
+    nothing in an eligible tier is --tier doing exactly what it was asked to.
+    """
+    dropped = []
+    for family in sorted(families):
+        if family in by_family:
+            continue
+        if family in seen_families:
+            dropped.append((family, "no_eligible_instances"))
+        elif family in dead:
+            dropped.append((family, "dead"))
+        else:
+            dropped.append((family, "not_in_pfam"))
+    return dropped
+
+
+def write_dropped_families(path, dropped):
+    """Write the drop report. Always written, header-only when nothing dropped.
+
+    FETCH_DOMAIN_META declares it as a required output, so an unconditional file
+    keeps the task from failing on the happy path.
+    """
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(DROPPED_FAMILIES_COLUMNS)
+        writer.writerows(dropped)
+
+
+def read_dropped_families(path):
+    """Read back what write_dropped_families wrote (cache path)."""
+    with open(path) as fh:
+        return [(row["family"], row["reason"]) for row in csv.DictReader(fh, delimiter="\t")]
 
 
 def read_instances_tsv(path):
@@ -464,8 +540,14 @@ def content_digest(items):
     return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()
 
 
-def derived_key(release, families, pool_size, seed, reviewed_digest, taxa_digest):
+def derived_key(release, families, pool_size, seed, reviewed_digest, taxa_digest, tier):
     """Hash every input that can change the cached instance set or its columns.
+
+    `tier` is in here for the obvious reason and one less obvious one: it decides
+    which strata may be filled, so a warm cache written under --tier any would
+    otherwise serve a --tier human_only run non-human instances, which
+    downstream (domainsplit's human-only ingest) is a hard failure several steps
+    later rather than a wrong number here.
 
     The two UniProt tables belong in here as much as the Pfam release does.
     tier_of() reads `reviewed` to place an instance in a tier and the tier cascade
@@ -485,6 +567,7 @@ def derived_key(release, families, pool_size, seed, reviewed_digest, taxa_digest
             release,
             str(pool_size),
             str(seed),
+            tier,
             reviewed_digest,
             taxa_digest,
             ",".join(sorted(families)),
@@ -527,11 +610,19 @@ def parse_args():
     parser.add_argument(
         "--out-prefix",
         default="",
-        help="prefix for the four outputs; default writes sequences.fasta, species.tsv, "
-        "go_annotations.tsv and instances.tsv in the working directory",
+        help="prefix for the outputs; default writes sequences.fasta, species.tsv, "
+        "go_annotations.tsv, instances.tsv and dropped_families.tsv in the working directory",
     )
     parser.add_argument("--pool-size", type=int, default=5, help="instances sampled per family (M); default 5")
     parser.add_argument("--seed", type=int, default=42, help="sampling seed; default 42")
+    parser.add_argument(
+        "--tier",
+        choices=sorted(TIER_ELIGIBILITY),
+        default="any",
+        help="which strata may be sampled: 'any' fills all four in preference order, "
+        "'human_only' makes the two non-human strata ineligible, so a family with no "
+        "human instance ends with zero instances; default any",
+    )
     parser.add_argument("--clans", help="precomputed Pfam-A.clans.tsv(.gz), skipping that download")
     parser.add_argument("--pfam-fasta", help="local Pfam-A.fasta.gz, skipping the 6.3 GB download")
     parser.add_argument("--interpro-cache", help="directory for cached downloads and sampled instances")
@@ -547,9 +638,15 @@ def main():
     species_out = f"{prefix}species.tsv"
     go_out = f"{prefix}go_annotations.tsv"
     instances_out = f"{prefix}instances.tsv"
+    dropped_out = f"{prefix}dropped_families.tsv"
 
     families = read_families(args)
-    print(f"Requested {len(families):,} Pfam families", file=sys.stderr)
+    eligible = TIER_ELIGIBILITY[args.tier]
+    print(
+        f"Requested {len(families):,} Pfam families "
+        f"(--tier {args.tier}: {', '.join(TIERS[t] for t in sorted(eligible))})",
+        file=sys.stderr,
+    )
 
     release = args.pfam_release or parse_release(download_text(PFAM_VERSION_URL, gzipped=True))
     print(f"Pfam release {release}", file=sys.stderr)
@@ -568,6 +665,16 @@ def main():
         f"{len(reviewed):,} reviewed accessions",
         file=sys.stderr,
     )
+    # Under --tier human_only every kept instance is HUMAN, so a speclist that
+    # cannot resolve that mnemonic leaves instances.tsv's taxon_id column blank
+    # for the whole run -- which a consumer asserting taxon 9606 reads as "not
+    # human" and aborts on, several steps later.
+    if args.tier == "human_only" and "HUMAN" not in taxa:
+        print(
+            "Warning: speclist.txt has no HUMAN mnemonic, so taxon_id will be blank "
+            "for every instance under --tier human_only",
+            file=sys.stderr,
+        )
 
     key = derived_key(
         release,
@@ -576,16 +683,23 @@ def main():
         args.seed,
         content_digest(reviewed),
         content_digest(f"{mnemonic}\t{taxon}" for mnemonic, taxon in taxa.items()),
+        args.tier,
     )
     cached_instances = cache.path(f"instances-{key}.tsv")
     cached_sequences = cache.path(f"sequences-{key}.fasta")
+    cached_dropped = cache.path(f"dropped-{key}.tsv")
     stats = Counter()
 
-    if cached_instances and os.path.exists(cached_instances) and os.path.exists(cached_sequences):
+    # All three or none: the drop report cannot be rebuilt from instances.tsv
+    # (it names families that are *not* in it, and distinguishes a tier drop from
+    # a dead accession), so a pair cached by an older version reads as a miss.
+    if cached_instances and all(os.path.exists(p) for p in (cached_instances, cached_sequences, cached_dropped)):
         print(f"Reusing cached instances for key {key}", file=sys.stderr)
         by_family = read_instances_tsv(cached_instances)
+        dropped = read_dropped_families(cached_dropped)
         shutil.copyfile(cached_instances, instances_out)
         shutil.copyfile(cached_sequences, fasta_out)
+        shutil.copyfile(cached_dropped, dropped_out)
     else:
         wanted = set(families)
         fasta_path = args.pfam_fasta
@@ -598,18 +712,31 @@ def main():
         if fasta_path:
             print(f"Streaming {fasta_path}...", file=sys.stderr)
             with open(fasta_path, "rb") as fh:
-                by_family, stats = sample_instances(iter_gzip_lines(fh), wanted, args.pool_size, reviewed, args.seed)
+                by_family, stats, seen = sample_instances(
+                    iter_gzip_lines(fh), wanted, args.pool_size, reviewed, args.seed, eligible
+                )
         else:
             print(f"Streaming {PFAM_FASTA_URL} (~6.3 GB gz)...", file=sys.stderr)
             with _open_url(PFAM_FASTA_URL, timeout=600) as resp:
-                by_family, stats = sample_instances(iter_gzip_lines(resp), wanted, args.pool_size, reviewed, args.seed)
+                by_family, stats, seen = sample_instances(
+                    iter_gzip_lines(resp), wanted, args.pool_size, reviewed, args.seed, eligible
+                )
 
         write_instances_tsv(instances_out, by_family, clans, taxa, reviewed)
         seqs = {rec["instance_id"]: rec["sequence"] for recs in by_family.values() for rec in recs}
         write_fasta(seqs, seqs.keys(), fasta_out)
+
+        # The dead table is only downloaded when something actually dropped, so
+        # the happy path still makes no extra request.
+        absent = [f for f in families if f not in by_family and f not in seen]
+        dead = parse_dead(cache.text("Pfam-A.dead", PFAM_DEAD_URL, gzipped=True)) if absent else set()
+        dropped = classify_dropped(families, by_family, seen, dead)
+        write_dropped_families(dropped_out, dropped)
+
         if cached_instances:
             shutil.copyfile(instances_out, cached_instances)
             shutil.copyfile(fasta_out, cached_sequences)
+            shutil.copyfile(dropped_out, cached_dropped)
 
     ids, species = build_species(by_family, taxa)
     write_species_tsv(species_out, ids, species)
@@ -625,12 +752,14 @@ def main():
     print(f"Written {n_instances:,} domain sequences to {fasta_out}", file=sys.stderr)
     print(f"Written {len(ids):,} species rows (instances + families) to {species_out}", file=sys.stderr)
     print(f"Written empty GO annotations to {go_out} (dropped in DDI mode)", file=sys.stderr)
+    print(f"Written {len(dropped):,} dropped families to {dropped_out}", file=sys.stderr)
 
     if stats:
         print(f"Scanned {stats['records']:,} Pfam-A records", file=sys.stderr)
-        for tier in TIERS:
+        for index, tier in enumerate(TIERS):
             offered, kept = stats[f"tier_{tier}_offered"], stats[f"tier_{tier}_kept"]
-            print(f"  tier {tier}: {offered:,} offered, {kept:,} kept", file=sys.stderr)
+            gate = "" if index in eligible else "  [ineligible under --tier]"
+            print(f"  tier {tier}: {offered:,} offered, {kept:,} kept{gate}", file=sys.stderr)
         for label, message in (
             ("unparsed_headers", "headers not matching the expected format"),
             ("empty_sequence", "sampled instances with an empty sequence"),
@@ -639,19 +768,15 @@ def main():
             if stats[label]:
                 print(f"Warning: {stats[label]:,} {message}", file=sys.stderr)
 
-    missing = [f for f in families if f not in by_family]
-    if missing:
-        dead = parse_dead(cache.text("Pfam-A.dead", PFAM_DEAD_URL, gzipped=True))
-        killed = sorted(f for f in missing if f in dead)
-        unknown = sorted(f for f in missing if f not in dead)
-        if killed:
-            print(f"Warning: {len(killed)} requested families are dead in Pfam: {_sample(killed)}", file=sys.stderr)
-        if unknown:
-            print(
-                f"Warning: {len(unknown)} requested families have no instances in Pfam-A.fasta "
-                f"and are not listed as dead: {_sample(unknown)}",
-                file=sys.stderr,
-            )
+    # One warning per reason, so "--tier dropped 4,000 families" cannot hide
+    # among dead accessions -- the first is a knob, the second is Pfam's history.
+    by_reason = defaultdict(list)
+    for family, reason in dropped:
+        by_reason[reason].append(family)
+    for reason, message in DROP_REASONS.items():
+        hit = by_reason.get(reason)
+        if hit:
+            print(f"Warning: {len(hit)} requested families {message}: {_sample(hit)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

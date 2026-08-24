@@ -74,6 +74,17 @@ workflow DATA_PREP_DDI {
         log.warn "--interpro_cache ${cache_dir} does not exist yet; FETCH_DOMAIN_META will create it."
     }
 
+    // FETCH_DOMAIN_META reads --instance_tier straight from params (so an
+    // embedding pipeline needs no wiring for it), which puts the value past
+    // channel construction and into fetch_domains.py's argparse. Check it here
+    // instead: a typo should not survive as far as a scheduled task.
+    if (!(params.instance_tier in ['any', 'human_only'])) {
+        error("--instance_tier must be 'any' or 'human_only', got '${params.instance_tier}'.")
+    }
+    if (params.instance_tier == 'human_only') {
+        log.info "--instance_tier human_only: families with no human Pfam instance keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
+    }
+
     shared_fetch   = FETCH_DOMAIN_META(
         families_list.map { families -> tuple([id: "_shared"], families) },
         clans_ch,

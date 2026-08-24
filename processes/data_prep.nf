@@ -35,10 +35,15 @@ process FETCH_DOMAIN_META {
     val cache_dir                    // absolute cache directory, or '' for no cache
 
     output:
-    tuple val(meta), path("sequences.fasta"),    emit: sequences
-    tuple val(meta), path("go_annotations.tsv"), emit: go_annotations
-    tuple val(meta), path("species.tsv"),        emit: species
-    tuple val(meta), path("instances.tsv"),      emit: instances
+    tuple val(meta), path("sequences.fasta"),        emit: sequences
+    tuple val(meta), path("go_annotations.tsv"),     emit: go_annotations
+    tuple val(meta), path("species.tsv"),            emit: species
+    tuple val(meta), path("instances.tsv"),          emit: instances
+    // Always written, header-only when nothing dropped, so this stays a required
+    // output. Published rather than turned into a MultiQC section: the fetch runs
+    // once per run under the synthetic "_shared" meta, so a section could only be
+    // run-wide, and QC does not run at all under --split_only.
+    tuple val(meta), path("dropped_families.tsv"),   emit: dropped_families
 
     script:
     def pool_size   = (params.ddi_examples_target as int) * (params.ddi_examples_pool_factor as int)
@@ -54,6 +59,7 @@ process FETCH_DOMAIN_META {
         --families  ${families} \\
         --pool-size ${pool_size} \\
         --seed      ${params.seed} \\
+        --tier      ${params.instance_tier} \\
         ${clans_arg} \\
         ${cache_arg} \\
         ${fasta_arg} \\
