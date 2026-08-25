@@ -657,6 +657,21 @@ read the network even when one is supplied. Validation, at channel construction:
   the network is ignored everywhere, `SELECT_EXAMPLES` included.
 - the same method listed twice → **error**.
 
+**Sizing the candidate network.** `ilp_candidates` can only draw pairs whose *both*
+endpoints are in the split it is sampling, because nodes are split-exclusive. Survival
+is therefore quadratic in a split's share: a network of `P` pairs spread evenly over the
+node set leaves roughly `P · f²` usable pairs in a split holding fraction `f` of the
+nodes. `SAMPLE_NEGATIVES_ILP` errors out rather than under-fill —
+
+```
+RuntimeError: val: need 11 negatives but only 7 candidate pairs are available.
+Supply a larger --candidate-network or lower the negative ratio.
+```
+
+— so size the network by the *smallest* split, not by the dataset. A split with `N`
+positives needs on the order of `sqrt(4N)` distinct nodes represented in the network to
+cover itself. `ilp` is unaffected: it draws from the full non-positive complement.
+
 **Filenames.** One entry leaves every output name exactly as it was
 (`train.csv`, `test_realistic_instances.csv`, …), so existing samplesheets are
 unaffected. Several entries suffix each split with the set's name:
