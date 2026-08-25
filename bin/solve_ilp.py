@@ -66,15 +66,20 @@ def build_matrices(clusters_list, protein_to_cluster, ppi_rows):
     return cross_ppi, intra_ppi
 
 
-def _seed_option(solver, seed):
-    """Solver-specific seed option, so a tie between equally-optimal assignments
-    is broken the same way on every run.
+def _solver_options(solver, seed, max_sec):
+    """Solver-specific time-limit and seed options.
 
-    The objective is a sum of PPI counts over cluster pairs, so ties are the
-    normal case rather than an edge case: several assignments discard exactly
-    the same number of cross-cluster PPIs, and which one comes back is decided
-    by the solver's internal randomisation. Without this the splits are not
-    reproducible even at a fixed --seed. Mirrors sample_negatives_ilp._solver_options.
+    time_limit is CVXPY's kwarg name for HiGHS specifically, not a generic
+    CVXPY option -- Gurobi wants TimeLimit and SCIP wants scip_params={'limits/time':
+    ...}. Passing the bare HiGHS name straight through (as this used to) means SCIP
+    rejects the kwarg outright and the solve never runs at all, so ilp_solver=SCIP with
+    no Gurobi license could never produce a split. Mirrors
+    sample_negatives_ilp._solver_options, which has always mapped this correctly.
+
+    The seed option exists so a tie between equally-optimal assignments is broken
+    the same way on every run: the objective is a sum of PPI counts over cluster
+    pairs, so ties are the normal case rather than an edge case, and without a seed
+    option the splits are not reproducible even at a fixed --seed.
 
     The name is upper-cased first because cp.GUROBI/HIGHS/SCIP are uppercase
     strings while the sibling params.neg_ilp_solver spells its solvers lowercase
@@ -84,11 +89,11 @@ def _seed_option(solver, seed):
     """
     solver = (solver or "").upper()
     if solver == cp.GUROBI:
-        return {"Seed": seed}
+        return {"TimeLimit": max_sec, "Seed": seed}
     if solver == cp.HIGHS:
-        return {"random_seed": seed}
+        return {"time_limit": max_sec, "random_seed": seed}
     if solver == cp.SCIP:
-        return {"scip_params": {"randomization/randomseedshift": seed}}
+        return {"scip_params": {"limits/time": max_sec, "randomization/randomseedshift": seed}}
     return {}
 
 
@@ -182,23 +187,24 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
 
     problem = cp.Problem(objective, constraints)
 
-    kwargs = dict(time_limit=max_sec, verbose=True)
     if solver:
-        seed_opt = _seed_option(solver, seed)
-        if not seed_opt:
+        solver_opts = _solver_options(solver, seed, max_sec)
+        if not solver_opts:
             print(
-                f"Warning: no seed option is known for solver {solver}, so its tie-breaking "
-                f"is unseeded and this split is not reproducible run to run.",
+                f"Warning: no solver-specific options are known for solver {solver}, so its time "
+                f"limit is passed under CVXPY's generic name (may be rejected) and its tie-breaking "
+                f"is unseeded, so this split is not reproducible run to run.",
                 file=sys.stderr,
             )
-        problem.solve(solver=solver, **kwargs, **seed_opt)
+            solver_opts = {"time_limit": max_sec}
+        problem.solve(solver=solver, verbose=True, **solver_opts)
     else:
         print(
             "Warning: no --solver given, so CVXPY picks one and its internal randomisation "
             "stays unseeded; pass --solver for a reproducible split.",
             file=sys.stderr,
         )
-        problem.solve(**kwargs)
+        problem.solve(time_limit=max_sec, verbose=True)
 
     if problem.status not in cp.settings.SOLUTION_PRESENT:
         print(f"Solver status: {problem.status}", file=sys.stderr)
