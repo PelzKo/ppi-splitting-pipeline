@@ -1,14 +1,18 @@
+// One task per (dataset, attribute, negative set). The negative set is carried
+// only so the caller can key the scatter plots by it -- nothing in the script
+// reads it, and the tag names it unconditionally so a row's several sets are
+// distinguishable in the log.
 process BIAS_ANALYSIS {
-    tag "${meta.id}_${attribute}"
+    tag "${meta.id}_${negset}_${attribute}"
     label 'error_retry'
 
     input:
-    tuple val(meta), val(attribute),
+    tuple val(meta), val(attribute), val(negset),
           path(train_csv), path(val_csv), path(test_balanced_csv), path(test_realistic_csv),
           path(blast_tsv), path(embeddings), path(go_annotations), path(species)
 
     output:
-    tuple val(meta), path("*_bias_mqc.tsv"), emit: mqc, optional: true
+    tuple val(meta), val(negset), path("*_bias_mqc.tsv"), emit: mqc, optional: true
 
     script:
     """

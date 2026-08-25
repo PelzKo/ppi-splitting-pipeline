@@ -17,6 +17,38 @@ def isGiven(v) {
     !(v == null || v == [])
 }
 
+// Parse and validate one row's negative-set list. A row's
+// negative_sampling_method is a comma-separated list of sampler names -- one
+// entry per negative set it wants out of the single positive split, so the
+// positive halves of the resulting datasets are byte-identical.
+// "ilp_candidates" is the ILP sampler restricted to the row's candidate_network
+// pool; "ilp" is the same sampler unrestricted.
+//
+// Called from PPI_SPLITTING's body rather than from buildDatasetsChannel(), so a
+// pipeline that includes this workflow and builds datasets_ch in Groovy is held
+// to the same rules -- the samplesheet schema only checks the string's shape, not
+// the cross-column ones. (The known-name list lives inside the function on
+// purpose: a top-level `def x = ...` in a Nextflow script is a local, invisible
+// here, which the linter rejects outright.)
+def parseNegsets(meta, candidate_network) {
+    def known = ["default", "ilp", "ilp_candidates", "uniform"]
+    def names = meta.negative_sampling_method.toString().tokenize(',')*.trim().findAll { n -> n }
+    if (!names) {
+        error("Dataset '${meta.id}': negative_sampling_method is empty -- name at least one of ${known.join(', ')}.")
+    }
+    def unknown = names.findAll { n -> !(n in known) }
+    if (unknown) {
+        error("Dataset '${meta.id}': unknown negative_sampling_method ${unknown.join(', ')} (known: ${known.join(', ')}).")
+    }
+    if (names.size() != new HashSet(names).size()) {
+        error("Dataset '${meta.id}': negative_sampling_method '${meta.negative_sampling_method}' names a method more than once -- each negative set is produced once.")
+    }
+    if ("ilp_candidates" in names && !candidate_network) {
+        error("Dataset '${meta.id}': negative_sampling_method lists 'ilp_candidates', which draws negatives from the candidate_network pool, but the row supplies no candidate_network.")
+    }
+    return names
+}
+
 // One row per PPI dataset. Anything left blank in the samplesheet falls
 // back to the corresponding default in nextflow.config, so a single run
 // can process several datasets in parallel, each with its own overrides.
@@ -120,10 +152,26 @@ workflow PPI_SPLITTING {
 
     main:
     ppis_ch = datasets_ch.map { meta, f -> tuple(meta, f.ppis) }
+
+    // Validate each row's negative-set list once, and gate its candidate network
+    // on it in the same pass: the network is read only when the row actually asked
+    // for the negative set that uses it, so "ilp" behaves identically whether or
+    // not a stray network is supplied. Gating here rather than in each consumer is
+    // what keeps SELECT_EXAMPLES and SAMPLE_NEGATIVES_ILP from disagreeing about
+    // whether the network is in play.
+    prepared_ch = datasets_ch.map { meta, f ->
+        def negsets = parseNegsets(meta, f.candidate_network)
+        if (f.candidate_network && !("ilp_candidates" in negsets)) {
+            log.warn "${meta.id}: candidate_network supplied but negative_sampling_method does not list 'ilp_candidates' -- ignoring the network everywhere, including SELECT_EXAMPLES"
+        }
+        tuple(meta, negsets, ("ilp_candidates" in negsets) ? f.candidate_network : [])
+    }
+    // tuple(meta, [negset, ...]) -- the negative sets this row wants, in list order.
+    negsets_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, negsets) }
     // Read by both SPLIT_POSITIVES (DDI mode's SELECT_EXAMPLES, where the pairs'
     // parent proteins join the same one-split-per-parent accounting as the
-    // positives) and SAMPLE_NEGATIVES.
-    candidate_network_ch = datasets_ch.map { meta, f -> tuple(meta, f.candidate_network) }
+    // positives) and SAMPLE_NEGATIVES. [] unless the row asked for ilp_candidates.
+    candidate_network_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, cand) }
 
     // DDI mode swaps the whole data-prep front end: Pfam family accessions in
     // place of UniProt ones, domain instances in place of full chains. Both
@@ -161,7 +209,8 @@ workflow PPI_SPLITTING {
         // DDI mode only (both empty channels in PPI mode): the per-split example
         // tables, protein universes and reserves of never-in-play proteins
         // EXPAND_NEGATIVES turns family pairs into instance pairs with.
-        split.ddi_files, data.instances
+        split.ddi_files, data.instances,
+        negsets_ch
     )
 
     // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +

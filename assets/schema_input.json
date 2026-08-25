@@ -133,7 +133,8 @@
       },
       "negative_sampling_method": {
         "type": "string",
-        "enum": ["default", "ilp", "uniform"]
+        "pattern": "^(default|ilp|ilp_candidates|uniform)(,(default|ilp|ilp_candidates|uniform))*$",
+        "errorMessage": "negative_sampling_method must be a comma-separated list, no spaces, of default | ilp | ilp_candidates | uniform -- one entry per negative set wanted out of the single positive split (e.g. 'ilp' or 'ilp,ilp_candidates'). Listing a method twice, or listing ilp_candidates without a candidate_network, is rejected at channel construction rather than here."
       },
       "neg_ilp_time_limit": {
         "type": "number",

@@ -10,12 +10,21 @@ def flattenMqc(ch) {
     }
 }
 
+// Same rule as subworkflows/sample_negatives.nf's negsuffix(), re-derived from
+// meta because the channels here carry one negative set at a time rather than the
+// row's whole list: "" for a single-negative-set row, so its MultiQC section names
+// are unchanged, "_<negset>" otherwise so the sets get one bias scatter each.
+// Keep the two in step.
+def negsuffix(meta, negset) {
+    meta.negative_sampling_method.toString().tokenize(',').size() > 1 ? "_${negset}" : ""
+}
+
 // Runs the per-attribute bias analyses, collects them into a scatter plot,
 // builds the train/val/test similarity heatmap, and assembles one combined
 // MultiQC report for the whole run from every dataset's diagnostics.
 workflow QC {
     take:
-    train_ppis            // tuple(meta, path)
+    train_ppis            // tuple(meta, negset, path)
     val_ppis
     test_balanced_ppis
     test_realistic_ppis
@@ -56,22 +65,36 @@ workflow QC {
         tuple(meta, attrs)
     }.flatMap { meta, attrs -> attrs.collect { a -> tuple(meta, a) } }
 
-    // train/val/test/blast/embeddings/go/species are one-per-dataset;
-    // combine(by: 0) broadcasts each dataset's single set of files to
-    // every one of that dataset's attributes, rather than a full cross-join.
-    bias_inputs = attrs_ch
-        .combine(train_ppis,          by: 0)
-        .combine(val_ppis,            by: 0)
-        .combine(test_balanced_ppis,  by: 0)
-        .combine(test_realistic_ppis, by: 0)
-        .combine(blast_out,           by: 0)
-        .combine(embeddings,          by: 0)
-        .combine(go_annotations_ch,   by: 0)
-        .combine(species_ch,          by: 0)
+    // One negative set's four labelled CSVs in one item, keyed (meta, negset) --
+    // join(by: [0, 1]), because a plain 1:1 join on meta would pair one negative
+    // set's train CSV with another's val CSV once a row asks for several.
+    negset_splits = train_ppis.join(val_ppis, by: [0, 1])
+        .join(test_balanced_ppis,  by: [0, 1])
+        .join(test_realistic_ppis, by: [0, 1])
+    // tuple(meta, negset, train, val, test_balanced, test_realistic)
+
+    // blast/embeddings/go/species are one-per-dataset; combine(by: 0) broadcasts
+    // each dataset's single set of files to every one of that dataset's
+    // (attribute, negative set) pairs, rather than a full cross-join. The bias
+    // analysis runs per negative set because that is the half of each dataset the
+    // sets differ in -- the positive half is shared by construction.
+    bias_inputs = negset_splits
+        .combine(attrs_ch, by: 0)
+        .map { meta, negset, train, val, tb, tr, attr -> tuple(meta, attr, negset, train, val, tb, tr) }
+        .combine(blast_out,         by: 0)
+        .combine(embeddings,        by: 0)
+        .combine(go_annotations_ch, by: 0)
+        .combine(species_ch,        by: 0)
 
     bias = BIAS_ANALYSIS(bias_inputs)
 
-    scatter = COLLECT_BIAS(flattenMqc(bias.mqc).groupTuple())
+    // One scatter per (dataset, negative set): the negset-qualified id is what
+    // keeps a row's two sets from being averaged into a single plot.
+    bias_by_negset = bias.mqc.flatMap { meta, negset, f ->
+        def files = (f instanceof List) ? f : [f]
+        files.collect { ff -> tuple("${meta.id}${negsuffix(meta, negset)}", ff) }
+    }
+    scatter = COLLECT_BIAS(bias_by_negset.groupTuple())
 
     heatmap_inputs = train_fasta.join(val_fasta).join(test_fasta).join(blast_out)
         .map { meta, t, v, te, b -> tuple(meta.id, t, v, te, b) }
@@ -79,7 +102,9 @@ workflow QC {
 
     splitting_mqc = flattenMqc(sorted_mqc).mix(flattenMqc(nr_mqc))
 
-    // One stacked bar per dataset accounting for every input DDI: discarded by
+    // One stacked bar per dataset -- not per negative set: every bar it reads back
+    // is a splitting-stage bar, and the splitting stage runs once per row whatever
+    // the negative sets are. Accounting for every input DDI: discarded by
     // the partitioner, removed by CD-HIT-2D, dropped because no domain-instance
     // example was left for it, or kept. It reads the counts back out of the
     // splitting stage's own MultiQC bars rather than re-deriving them, so the

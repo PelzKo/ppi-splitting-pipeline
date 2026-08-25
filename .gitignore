@@ -12,6 +12,7 @@ results/
 data/*
 !data/test_ppis.csv
 !data/test_ddis.csv
+!data/test_ddi_candidates.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

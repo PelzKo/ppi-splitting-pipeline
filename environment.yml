@@ -16,7 +16,14 @@ dependencies:
   - plotly
   - pyscipopt
   - pip:
-    - torch
+    # Pinned, not bare `torch`: an unpinned resolve once picked a cu13x wheel on
+    # a CUDA 12.8 driver, torch.cuda.is_available() silently returned False, and
+    # the embedding task ran 12h on CPU before SLURM killed it (see CLAUDE.md).
+    # Wheel's CUDA major must not exceed the driver's -- bump both together if
+    # the cluster driver changes. This is the only place the pin lives; Dockerfile
+    # installs torch by reusing this file rather than reinstalling it separately.
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+    - torch==2.10.0+cu128
     - transformers
     - sentencepiece
     - protobuf

@@ -115,7 +115,7 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 
 **SAMPLE_NEGATIVES_DEGREE** — Samples random negative pairs for each split. By default, negatives are drawn such that each protein's degree distribution is approximately preserved, producing a balanced test set (1:1 positive:negative) and a realistic test set (1:10 ratio). With `negative_sampling_method=uniform`, endpoints are instead drawn fully uniformly at random for *every* split (not just the realistic test set) — see [Naive baseline: the topology shortcut](#naive-baseline-the-topology-shortcut-optional) below.
 
-**SAMPLE_NEGATIVES_ILP** – An ILP-based alternative satisfying the size constraints while minimizing biases between the positive and negative sets; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below.
+**SAMPLE_NEGATIVES_ILP** – An ILP-based alternative satisfying the size constraints while minimizing biases between the positive and negative sets; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below. Under `negative_sampling_method=ilp_candidates` the same sampler draws only from the row's `candidate_network` pool, and a row may ask for several negative sets at once — see [Several negative sets from one positive split](#several-negative-sets-from-one-positive-split-optional).
 
 **EXPAND_NEGATIVES** — DDI mode only. Both samplers draw negatives as family pairs; this step turns them into the instance pairs the classifier trains on. Positives are copied from `SELECT_EXAMPLES` rather than redrawn, and each negative family pair gets up to `N` instance pairs from that split's own protein universe, drawn by the same rule the positives were — topped up from this split's reserve of never-claimed proteins when the universe is too thin, which `SELECT_EXAMPLES` has already partitioned so no two splits can be handed the same one. Nothing is resampled to repair the ratio: a negative pair can end up with fewer than `N` examples, so the example-level ratio can drift from the family-level one. Both are reported.
 
@@ -212,6 +212,10 @@ DDI mode keeps this layout and adds a few files to it — `data/instances.tsv`, 
 `examples/` folder, and the instance-level `{split}_instances.csv` next to the
 family-level `{split}.csv`; see [DDI mode](#ddi-mode) below.
 
+A row asking for several negative sets suffixes each split with the set's name
+(`train_ilp.csv`, `train_ilp_candidates.csv`, …) — see
+[Several negative sets from one positive split](#several-negative-sets-from-one-positive-split-optional).
+
 ---
 
 ## Multiple datasets (samplesheet)
@@ -235,12 +239,12 @@ string,data/string.csv,ilp,ilp,0.5,0.5
 | `sequences`, `go_annotations`, `species`                                                                   | UniProt fetch step          | Supply all three to skip `FETCH_DATA` for this dataset. In DDI mode `go_annotations` is unused and the trio is `sequences`, `species`, `domain_instances` instead.                                                                                       |
 | `domain_instances`                                                                                         | Pfam fetch step             | DDI mode only. A precomputed `instances.tsv`; supply it together with `sequences` and `species` to skip `FETCH_DOMAIN_META` for this dataset.                                                                                                            |
 | `blast_results`                                                                                            | BLAST step                  | Supply to skip `RUN_BLAST` for this dataset (a precomputed `all_vs_all.tsv`).                                                                                                                                                                           |
-| `candidate_network`                                                                                        | —                           | Optional candidate pool CSV for the ILP negative sampler — high-confidence non-interacting *family* pairs in DDI mode, where it also feeds `SELECT_EXAMPLES`. Supplied per row only; it has no `nextflow.config` default.                                 |
+| `candidate_network`                                                                                        | —                           | Candidate pool CSV (`protein1,protein2`) for the `ilp_candidates` negative set — high-confidence non-interacting *family* pairs in DDI mode, where it also feeds `SELECT_EXAMPLES`. Supplied per row only; it has no `nextflow.config` default. **Read only when the row lists `ilp_candidates`**: listing `ilp_candidates` without it is an error, and supplying it without listing `ilp_candidates` warns and ignores it everywhere. |
 | `partition`, `node_mapping`                                                                                | Clustering step             | Only read when `--split_only` is set (see [Best-practice short run](#best-practice-short-run---split_only) below) — a precomputed `partitioned_proteome.txt`/`node_mapping.tsv` pair that lets that mode skip `CLUSTERING` entirely. Ignored otherwise. |
 | `embedding_model`, `cdhit_identity`, `cdhit_wordsize`                                                      | `params.*` of the same name | Defaults: `embedding_model`: esm2, `cdhit_identity`: 0.4, `cdhit_wordsize`: 2                                                                                                                                                                           |
 | `split_method`, `edge_weight`, `kahip_k`, `ilp_kahip_k`, `ilp_epsilon`                                     | `params.*` of the same name | Defaults: `split_method`: kahip (k=3), `edge_weight`: normalized_bitscore, `kahip_k`: 3, `ilp_kahip_k`: 100, `ilp_epsilon`: 0.05. `split_method=random` is a naive baseline, see below                                                                  |
 | `train_split`, `val_split`, `test_split`                                                                   | `params.*` of the same name | Defaults: 0.8, 0.1, 0.1. Must sum to 1; any one of them may be `0` (that split then comes out empty). Only `ilp` and `random` read them — `kahip` sizes its splits from the KaHIP blocks themselves                                                       |
-| `negative_sampling_method`                                                                                 | `params.*` of the same name | Defaults: default (alternatives: ilp, uniform — see below)                                                                                                                                                                                              |
+| `negative_sampling_method`                                                                                 | `params.*` of the same name | Defaults: default (alternatives: ilp, ilp_candidates, uniform — see below). A comma-separated list (`ilp,ilp_candidates`) asks for one negative set per entry over a single shared positive split; see [Several negative sets from one positive split](#several-negative-sets-from-one-positive-split-optional) |
 | `neg_ilp_lambda_degree`, `neg_ilp_lambda_taxon_pair`, `neg_ilp_lambda_self_loop`, `neg_ilp_lambda_jaccard` | `params.*` of the same name | Only used when `negative_sampling_method` is `ilp`; see [Bias-aware ILP negative sampling](#bias-aware-ilp-negative-sampling-optional) below. Highly dataset-specific, so overridable per row rather than fixed run-wide. `--ddi_mode` forces `neg_ilp_lambda_jaccard` to 0 regardless of the row, since that term matches GO overlap and DDI mode has no GO annotations. |
 
 Everything else (solver settings, Gurobi license, resource limits, seeds,
@@ -457,6 +461,12 @@ results/<id>/
 └── {train,val,test_balanced,test_realistic}_instances.csv  # instance-level -- what the classifier trains on
 ```
 
+A row asking for several negative sets suffixes both of those last two lines with
+the set's name, except `test_realistic`, which stays one shared file — see
+[Several negative sets from one positive split](#several-negative-sets-from-one-positive-split-optional).
+Everything above them, `examples/` included, is produced once per row whatever the
+negative sets are.
+
 The instance-level files carry `protein1,protein2,label` plus `family1,family2`.
 Those two extra columns are how `TRAIN_CLASSIFIER` and `BIAS_ANALYSIS` recognise
 DDI mode — neither takes a flag for it.
@@ -583,8 +593,8 @@ leaves them blank.
 
 | Parameter                   | Default   | Description                                                                                                                                                              |
 |-----------------------------|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `negative_sampling_method`  | `default` | `default` (random) or `ilp`                                                                                                                                              |
-| `candidate_network`         | —         | Optional CSV (`protein1,protein2`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Samplesheet column only — there is no `nextflow.config` default. Recommended for large protein universes (see below). |
+| `negative_sampling_method`  | `default` | `default` (random), `ilp`, `ilp_candidates` (`ilp` restricted to `candidate_network`), or `uniform`. A comma-separated list asks for one negative set per entry — see [Several negative sets from one positive split](#several-negative-sets-from-one-positive-split-optional) |
+| `candidate_network`         | —         | CSV (`protein1,protein2`) restricting the candidate pool, e.g. a Negatome database or a topology-driven pool. Samplesheet column only — there is no `nextflow.config` default. Read only by the `ilp_candidates` negative set; recommended for large protein universes (see below). |
 | `neg_ilp_lambda_degree`     | `1.0`     | Weight of the per-protein aggregate degree-matching term                                                                                                                 |
 | `neg_ilp_lambda_taxon_pair` | `1.0`     | Weight of the global taxon-pair matching term                                                                                                                            |
 | `neg_ilp_lambda_self_loop`  | `1.0`     | Weight of the self-interaction count matching term                                                                                                                       |
@@ -622,6 +632,63 @@ then turns them into domain-instance pairs.
 
 ---
 
+## Several negative sets from one positive split (optional)
+
+`negative_sampling_method` takes a comma-separated list, one entry per negative
+set wanted:
+
+```bash
+nextflow run main.nf --negative_sampling_method ilp,ilp_candidates
+```
+
+Every entry names a sampler — `default`, `ilp`, `ilp_candidates`, or `uniform` —
+and the entries share **one** positive split. Splitting, redundancy removal and
+(in DDI mode) `SELECT_EXAMPLES` all still run once per row, so the positive rows
+of the resulting datasets are identical by construction, not by luck: the sets
+differ only in their negatives. That is the point of the feature — comparing two
+negative-sampling strategies with the positives held fixed.
+
+`ilp_candidates` is `SAMPLE_NEGATIVES_ILP` restricted to the row's
+`candidate_network` pool; `ilp` is the same sampler unrestricted, and does not
+read the network even when one is supplied. Validation, at channel construction:
+
+- `ilp_candidates` listed with no `candidate_network` → **error**.
+- `candidate_network` supplied but `ilp_candidates` not listed → **warning**, and
+  the network is ignored everywhere, `SELECT_EXAMPLES` included.
+- the same method listed twice → **error**.
+
+**Filenames.** One entry leaves every output name exactly as it was
+(`train.csv`, `test_realistic_instances.csv`, …), so existing samplesheets are
+unaffected. Several entries suffix each split with the set's name:
+
+```
+results/<id>/
+├── train_ilp.csv                 ├── train_ilp_candidates.csv
+├── val_ilp.csv                   ├── val_ilp_candidates.csv
+├── test_balanced_ilp.csv         ├── test_balanced_ilp_candidates.csv
+└── test_realistic.csv            (one shared file, see below)
+```
+
+`test_realistic` is the one exception. Its negatives are drawn uniformly at
+random for *every* method (the ILP path excludes that split by design, and
+`uniform`/`default` both sample it uniformly), so over one shared positive split
+with one seed its content cannot depend on the negative set. It is therefore
+sampled — and in DDI mode expanded — once, published unsuffixed, and reported as
+belonging to every set. The pipeline logs one line per affected dataset saying
+so.
+
+**MultiQC.** With several sets, the negative-sampling, classifier and bias
+sections tag their samples `<id>_<negset>` so the sets do not overlay each other
+in one chart; the splitting-stage sections and the DDI attrition waterfall stay
+per-dataset, because that stage runs once per row. `test_realistic`'s
+negative-sampling row appears once, under the plain dataset id.
+
+`bin/other/check_ddi_invariants.py` understands the suffixed layout and adds one
+check for it: every negative set of a row must carry the same positive rows in
+every split.
+
+---
+
 ## Standalone STRING channel analysis
 
 To investigate which STRING evidence channels explain classifier performance differences between datasets, use the standalone script (not part of the Nextflow pipeline):
@@ -651,11 +718,14 @@ include { PPI_SPLITTING } from './subworkflows/external/ppi-splitting/main.nf'
 // tuple(meta, filesMap) -- one item per dataset
 datasets_ch = channel.of(
     tuple(
-        [ id: 'minimal_leakage', split_method: 'ilp', negative_sampling_method: 'ilp',
+        [ id: 'minimal_leakage', split_method: 'ilp',
+          // one entry per negative set wanted out of this row's single positive split
+          negative_sampling_method: 'ilp,ilp_candidates',
           train_split: 0.7, val_split: 0.1, test_split: 0.2, /* ...every other meta key... */ ],
         [ ppis: file('3did.csv'), sequences: file('sequences.fasta'),
           species: file('species.tsv'), domain_instances: file('instances.tsv'),
-          go_annotations: [], blast_results: [], candidate_network: [],
+          candidate_network: file('candidate_network.csv'),
+          go_annotations: [], blast_results: [],
           partition: [], node_mapping: [] ]
     )
 )
@@ -693,10 +763,20 @@ Three things to get right:
 | `labelled_inst` | the same at domain-instance level; empty in PPI mode |
 | `multiqc_report` | `multiqc_report.html`; empty under `--split_only` |
 
-`negset` is the negative-sampling method the row asked for, carried as its own
-tuple field rather than inside `meta`. `label` is one of `train`, `val`,
-`test_balanced`, `test_realistic`. There is no `versions` channel — this pipeline
-does not capture tool versions anywhere.
+`negset` is one of the negative-sampling methods the row asked for, carried as its
+own tuple field rather than inside `meta` — putting it in `meta` would rekey every
+`join()`/`combine(by: 0)` in the pipeline. A row whose
+`negative_sampling_method` lists several methods emits one item per
+`(negset, label)`, all over the same positive rows; see
+[Several negative sets from one positive split](#several-negative-sets-from-one-positive-split-optional),
+and note that `test_realistic` is one shared file emitted once per `negset`.
+`label` is one of `train`, `val`, `test_balanced`, `test_realistic`. There is no
+`versions` channel — this pipeline does not capture tool versions anywhere.
+
+`negative_sampling_method` is validated inside `PPI_SPLITTING`, not in
+`buildDatasetsChannel()`, so a channel you build in Groovy is held to the same
+rules (unknown or duplicated method, `ilp_candidates` without a
+`candidate_network`) rather than failing later inside a task.
 
 Everything is still published to `--outdir` exactly as in a standalone run; the
 emits exist so an including pipeline can ingest or re-publish without knowing this

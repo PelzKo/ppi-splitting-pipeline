@@ -20,28 +20,17 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # The same environment.yml the conda profile uses, so the two profiles cannot
-# drift apart in what they install.
+# drift apart in what they install. torch's cu128 pin lives in environment.yml
+# itself (see the comment there) -- this is the only torch install in the
+# image now; a prior version force-reinstalled a second copy here, which left
+# both the unpinned and pinned wheels in the image (~18GB combined, since
+# Docker layers are additive and never delete what an earlier layer wrote).
+# Keep the pin in sync with the driver on the target cluster.
+ENV PIP_NO_CACHE_DIR=1
 COPY environment.yml /tmp/environment.yml
 RUN micromamba install -y -n base -f /tmp/environment.yml \
  && micromamba clean --all --yes
 ENV PATH=/opt/conda/bin:$PATH
-
-# environment.yml:19 is a bare `torch`, so pip resolves whatever wheel is current
-# at build time. That is the exact failure EMBED_SEQUENCES' --require-gpu exists to
-# catch: an unpinned install once fetched a cu13x wheel onto a CUDA 12.8 driver,
-# torch.cuda.is_available() returned False, and the task ran 12 h on CPU before
-# SLURM killed it. The rule is that the wheel's CUDA major must not exceed the
-# driver's (minors are compatible), so the image pins one wheel explicitly and
-# overwrites whatever the environment.yml step resolved.
-#
-# Keep this in sync with the driver on the target cluster. Once environment.yml
-# carries the pin itself (docs/ddi-review-plan.md, "Outstanding after Phase 3"),
-# delete this layer rather than maintaining two sources of truth.
-ARG TORCH_VERSION=2.10.0
-ARG TORCH_CUDA=cu128
-RUN pip install --no-cache-dir --force-reinstall \
-      --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
-      torch==${TORCH_VERSION}+${TORCH_CUDA}
 
 # Nextflow puts only the *root* project's bin/ on PATH. Standalone that is this
 # repo, but when this pipeline is included as a subworkflow the root project is
