@@ -108,4 +108,12 @@ workflow DATA_PREP_DDI {
     species        = precomputed_species.mix(subset_out.species)
     lengths        = precomputed_lengths.mix(subset_out.lengths)
     instances      = precomputed_instances.mix(subset_out.instances)
+    // The one artefact that explains a shrunken DDI count, so an embedding
+    // pipeline gets a channel rather than a hardcoded results/_shared/data/ path.
+    // Two properties to respect: the fetch runs once per run under the synthetic
+    // [id: "_shared"] meta, so this carries at most one item whose meta matches no
+    // dataset -- join() it against a per-dataset channel and you get zero items --
+    // and it is legitimately empty when every dataset supplied precomputed domain
+    // data, so nothing may block on it.
+    dropped_families = shared_fetch.dropped_families
 }

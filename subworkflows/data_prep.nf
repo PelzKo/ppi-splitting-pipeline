@@ -61,4 +61,9 @@ workflow DATA_PREP {
     species        = species_ch
     lengths        = lengths_ch
     instances      = instances_ch
+    // DDI-only (Pfam can drop a family; UniProt fetch has no equivalent). Emitted
+    // empty so both DATA_PREP* emit shapes stay identical and main.nf's single
+    // `params.ddi_mode ?` branch gains no second difference -- same reason
+    // instances_ch above is a placeholder rather than an omission.
+    dropped_families = channel.empty()
 }

@@ -286,10 +286,12 @@ def sample_instances(stream, wanted, pool_size, reviewed, seed, eligible=None):
     file ever stops being contiguous, rather than silently truncating a family to
     its first block.
 
-    That bound is linear in pool_size, i.e. in --ddi_examples_pool_factor: ~150 MB
-    at full Pfam with M = 5, so ~450 MB at the M = 15 the factor-3 configuration
-    asks for. Check FETCH_DOMAIN_META's memory in nextflow.config before raising
-    the factor.
+    That bound is linear in pool_size = ddi_examples_target x
+    ddi_examples_pool_factor: roughly 30 MB per unit of M at full Pfam, so the
+    current defaults (N = 5, factor = 5, M = 25) cost ~750 MB against
+    FETCH_DOMAIN_META's 4 GB in nextflow.config. Re-check that headroom before
+    raising either param -- the product is what matters, and the target scales it
+    exactly as the factor does.
     """
     if eligible is None:
         eligible = TIER_ELIGIBILITY["any"]

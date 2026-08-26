@@ -77,6 +77,12 @@ def buildDatasetsChannel() {
         // so every one of those steps' precomputed-input escape hatches
         // becomes mandatory, and the split/negative-sampling method choice
         // is no longer per-dataset -- it's always the ILP path.
+        //
+        // PPI_SPLITTING's body re-checks this for every caller (an embedding
+        // pipeline never runs this function). Kept here as well because it fires
+        // before any channel exists and names the offending samplesheet *row*,
+        // which is the better message for a standalone run -- so the two must be
+        // changed together.
         if (params.split_only) {
             // DDI mode has no GO annotations at all (they describe proteins, not
             // domain families) and needs the domain instance table instead.
@@ -151,7 +157,39 @@ workflow PPI_SPLITTING {
                   // downstream breaks the joins, which key on the whole map.
 
     main:
-    ppis_ch = datasets_ch.map { meta, f -> tuple(meta, f.ppis) }
+    // --split_only skips CLUSTERING/TRAIN_BASELINE/QC outright, which makes every
+    // one of their precomputed-input escape hatches mandatory and pins both method
+    // choices to the ILP path. buildDatasetsChannel() forces the two methods and
+    // checks the five files for the samplesheet entry, but an embedding pipeline
+    // builds meta itself and never reaches it -- same reason parseNegsets() lives
+    // here rather than there.
+    //
+    // Validated, never rewritten. Forcing a method here would mean silently
+    // editing a meta the caller built deliberately, and meta is the key for every
+    // join()/combine(by: 0) below -- so the closure hands back the two objects it
+    // was given, untouched, and a caller that asked for kahip under --split_only
+    // is told rather than quietly given something else.
+    checked_ch = datasets_ch.map { meta, f ->
+        if (params.split_only) {
+            // DDI mode has no GO annotations at all (they describe proteins, not
+            // domain families) and needs the domain instance table instead.
+            def required = params.ddi_mode
+                ? ["sequences", "species", "domain_instances", "partition", "node_mapping"]
+                : ["sequences", "go_annotations", "species", "partition", "node_mapping"]
+            // The files map, not a samplesheet row: an absent optional file is []
+            // here, never null, so plain falsiness is the right test.
+            def missing = required.findAll { k -> !f[k] }
+            if (missing) {
+                error("--split_only requires every dataset to supply ${required.join(', ')} (dataset '${meta.id}' is missing ${missing.join(', ')}).")
+            }
+            if (meta.split_method != "ilp" || meta.negative_sampling_method != "ilp") {
+                error("--split_only runs the ILP path only, but dataset '${meta.id}' asks for split_method='${meta.split_method}', negative_sampling_method='${meta.negative_sampling_method}'. A samplesheet run gets both forced in buildDatasetsChannel(); a caller that builds meta itself must set them.")
+            }
+        }
+        tuple(meta, f)
+    }
+
+    ppis_ch = checked_ch.map { meta, f -> tuple(meta, f.ppis) }
 
     // Validate each row's negative-set list once, and gate its candidate network
     // on it in the same pass: the network is read only when the row actually asked
@@ -159,7 +197,7 @@ workflow PPI_SPLITTING {
     // not a stray network is supplied. Gating here rather than in each consumer is
     // what keeps SELECT_EXAMPLES and SAMPLE_NEGATIVES_ILP from disagreeing about
     // whether the network is in play.
-    prepared_ch = datasets_ch.map { meta, f ->
+    prepared_ch = checked_ch.map { meta, f ->
         def negsets = parseNegsets(meta, f.candidate_network)
         if (f.candidate_network && !("ilp_candidates" in negsets)) {
             log.warn "${meta.id}: candidate_network supplied but negative_sampling_method does not list 'ilp_candidates' -- ignoring the network everywhere, including SELECT_EXAMPLES"
@@ -179,21 +217,21 @@ workflow PPI_SPLITTING {
     // Both take the whole files map and pick the keys they need -- which keys
     // those are is stated in each one's `take:` comment.
     if (params.ddi_mode) {
-        data = DATA_PREP_DDI(datasets_ch)
+        data = DATA_PREP_DDI(checked_ch)
     } else {
-        data = DATA_PREP(datasets_ch)
+        data = DATA_PREP(checked_ch)
     }
 
     if (params.split_only) {
         // --split_only: partition/node_mapping are precomputed and required
-        // (validated in buildDatasetsChannel), so CLUSTERING (FETCH_DATA/
+        // (validated above, for every caller), so CLUSTERING (FETCH_DATA/
         // RUN_BLAST/MAKE_METIS/RUN_KAHIP) never needs to run at all.
-        partition_ch    = datasets_ch.map { meta, f -> tuple(meta, f.partition) }
-        node_mapping_ch = datasets_ch.map { meta, f -> tuple(meta, f.node_mapping) }
+        partition_ch    = checked_ch.map { meta, f -> tuple(meta, f.partition) }
+        node_mapping_ch = checked_ch.map { meta, f -> tuple(meta, f.node_mapping) }
     } else {
         clustered = CLUSTERING(
             data.sequences, data.lengths,
-            datasets_ch.map { meta, f -> tuple(meta, f.blast_results) },
+            checked_ch.map { meta, f -> tuple(meta, f.blast_results) },
             data.instances
         )
         partition_ch    = clustered.partition
@@ -237,14 +275,21 @@ workflow PPI_SPLITTING {
     // Everything an embedding pipeline needs to ingest the result. The two
     // labelled channels carry the negative-set name as its own tuple field
     // rather than inside meta, because every join()/combine(by: 0) above keys on
-    // the unmodified meta map -- see PLAN_domainsplit_integration.md §5. With one
-    // negative-sampling method per row, which is all the samplesheet accepts
-    // today, that field is just that method's name.
-    instances      = data.instances     // tuple(meta, instances.tsv); (meta, []) in PPI mode
-    sequences      = data.sequences     // tuple(meta, sequences.fasta)
-    labelled       = neg.labelled       // tuple(meta, negset, label, csv) at family level
-    labelled_inst  = neg.labelled_inst  // same, at domain-instance level; empty in PPI mode
-    multiqc_report = multiqc_report_ch   // path multiqc_report.html; empty under --split_only
+    // the unmodified meta map -- see PLAN_domainsplit_integration.md §5. That
+    // field is one entry of the row's comma-separated negative_sampling_method:
+    // a row listing N of them emits N items per split, all over the same positive
+    // rows, so a consumer that cares which set a CSV belongs to must join on
+    // `by: [0, 1]` rather than on meta alone.
+    instances        = data.instances     // tuple(meta, instances.tsv); (meta, []) in PPI mode
+    sequences        = data.sequences     // tuple(meta, sequences.fasta)
+    labelled         = neg.labelled       // tuple(meta, negset, label, csv) at family level
+    labelled_inst    = neg.labelled_inst  // same, at domain-instance level; empty in PPI mode
+    multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only
+    // tuple([id: "_shared"], dropped_families.tsv) -- the families Pfam had nothing
+    // usable for, with a reason column. At most one item, and its meta is the
+    // synthetic shared one, so do not join() it against any per-dataset channel.
+    // Empty in PPI mode and whenever no dataset needed a fetch.
+    dropped_families = data.dropped_families
 }
 
 workflow {
