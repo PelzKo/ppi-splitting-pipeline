@@ -91,7 +91,7 @@ from utils import (  # noqa: E402
     read_ppis,
     write_ppi_csv,
 )
-from solve_ilp import _seed_option  # noqa: E402
+from solve_ilp import _solver_options  # noqa: E402
 
 SPLITS = ["train", "val", "test"]
 EXAMPLE_COLUMNS = ["protein1", "protein2", "family1", "family2"]
@@ -228,21 +228,29 @@ def _run_stage(problem, label, secs, ctx):
     missing or misconfigured raises instead, which still stops the run rather than
     quietly degrading every component.
     """
-    kwargs = dict(time_limit=secs, verbose=ctx.verbose)
+    # solve_ilp._solver_options maps both the time limit and the seed to the names
+    # the chosen solver actually takes -- time_limit is CVXPY's HiGHS-specific
+    # kwarg, Gurobi wants TimeLimit and SCIP wants scip_params={'limits/time': ...},
+    # and SCIP rejects the bare kwarg outright rather than ignoring it. The generic
+    # name is only used as a last resort for a solver it does not know.
+    kwargs = {"verbose": ctx.verbose}
     if ctx.solver:
-        seed_opt = _seed_option(ctx.solver, ctx.seed)
-        if not seed_opt:
+        solver_opts = _solver_options(ctx.solver, ctx.seed, secs)
+        if not solver_opts:
             _warn_once(
-                f"Warning: no seed option is known for solver {ctx.solver}, so its tie-breaking is "
-                f"unseeded and this selection is not reproducible run to run."
+                f"Warning: no solver-specific options are known for solver {ctx.solver}, so its time "
+                f"limit is passed under CVXPY's generic name (may be rejected) and its tie-breaking is "
+                f"unseeded, so this selection is not reproducible run to run."
             )
-        kwargs.update(seed_opt)
+            solver_opts = {"time_limit": secs}
+        kwargs.update(solver_opts)
         kwargs["solver"] = ctx.solver
     else:
         _warn_once(
             "Warning: no --solver given, so CVXPY picks one and its internal randomisation stays "
             "unseeded; pass --solver for a reproducible selection."
         )
+        kwargs["time_limit"] = secs
 
     ctx.stages += 1
     try:
