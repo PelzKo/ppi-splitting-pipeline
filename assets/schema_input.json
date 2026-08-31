@@ -39,6 +39,13 @@
         "errorMessage": "If supplied, species must be a path to an existing species file species.tsv",
         "pattern": "species\\.tsv$"
       },
+      "domain_instances": {
+        "type": "string",
+        "format": "file-path",
+        "exists": true,
+        "errorMessage": "If supplied, domain_instances must be a path to an existing instances.tsv. Only used with --ddi_mode, where it supplies precomputed domain instances alongside sequences and species (bypasses FETCH_DOMAIN_META).",
+        "pattern": "instances\\.tsv$"
+      },
       "blast_results": {
         "type": "string",
         "format": "file-path",
@@ -51,7 +58,7 @@
         "format": "file-path",
         "exists": true,
         "errorMessage": "If supplied, must be a path to a csv containing scores for negative candidates with columns protein1,protein2,w",
-        "pattern": "^*\\.csv$"
+        "pattern": "^.*\\.csv$"
       },
       "partition": {
         "type": "string",
@@ -126,7 +133,8 @@
       },
       "negative_sampling_method": {
         "type": "string",
-        "enum": ["default", "ilp", "uniform"]
+        "pattern": "^(default|ilp|ilp_candidates|uniform)(,(default|ilp|ilp_candidates|uniform))*$",
+        "errorMessage": "negative_sampling_method must be a comma-separated list, no spaces, of default | ilp | ilp_candidates | uniform -- one entry per negative set wanted out of the single positive split (e.g. 'ilp' or 'ilp,ilp_candidates'). Listing a method twice, or listing ilp_candidates without a candidate_network, is rejected at channel construction rather than here."
       },
       "neg_ilp_time_limit": {
         "type": "number",

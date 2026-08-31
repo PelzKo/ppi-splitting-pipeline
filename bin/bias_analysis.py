@@ -10,8 +10,17 @@ Attributes
 sequence_similarity           – BLAST pident between the pair, normalised to [0,1]
 embedding_similarity          – cosine similarity of the two protein embeddings
 functional_relatedness_BP/MF/CC – Jaccard similarity of GO term sets
-self_interactions             – 1 if both proteins are identical, 0 otherwise
+self_interactions             – 1 if both nodes are identical, 0 otherwise
 same species                  – 1 if both proteins belong to the same species, 0 otherwise
+topology_shortcut             – the two nodes' positive rate among the training split's own pairs
+parent_degree                 – DDI mode only: how often this pair's parent proteins are reused
+
+DDI mode is detected from the labelled CSV's own columns, not from a flag: its
+rows are domain-*instance* pairs carrying the Pfam family pair they represent in
+family1/family2, so read_family_pairs() returns None for a PPI-mode file. Two
+attributes therefore run one level above the rows -- self_interactions and
+topology_shortcut act on the *node* pair, which is the protein pair in PPI mode
+and the family pair in DDI mode -- and are the identical computation in both.
 
 Utility       = NMI(A; Y) = MI / sqrt(H(A)·H(Y)), MI estimated by sklearn kNN, H(A) by histogram
 Detectability = Spearman ρ of a Ridge regressor predicting A from the pair embedding X
@@ -33,7 +42,7 @@ from sklearn.linear_model import Ridge
 from sklearn.feature_selection import mutual_info_classif
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import load_embeddings, read_labelled_csv
+from utils import instance_parent, load_embeddings, read_family_pairs, read_labelled_csv
 
 
 def build_pair_X(pairs, embeddings):
@@ -106,9 +115,47 @@ def load_go_annotations(path):
     return result
 
 
-def self_interactions(pairs):
-    """1 if both proteins in the pair are identical, 0 otherwise."""
-    return np.array([1.0 if p1 == p2 else 0.0 for p1, p2 in pairs], dtype=np.float32)
+def self_interactions(node_pairs):
+    """1 if both nodes in the pair are identical, 0 otherwise.
+
+    Called with the *node* pair, so this is a self-interaction in PPI mode and a
+    self-DDI (family1 == family2) in DDI mode -- which also catches a row whose
+    two sides are different domain instances of the same family, the case an
+    instance-level comparison would miss. Self-DDIs are legal and stay in
+    the pool, so this measures a real property rather than flagging bad input.
+    """
+    return np.array([1.0 if p1 == p2 else 0.0 for p1, p2 in node_pairs], dtype=np.float32)
+
+
+def parent_degree(pairs):
+    """Mean degree of the two parent proteins among this split's own pairs.
+
+    DDI mode only, and the attribute that would expose G2. Positives and
+    negatives are both drawn as pure co-occurrence over the same per-split
+    protein universe -- SELECT_EXAMPLES and EXPAND_NEGATIVES share
+    utils.pair_candidates() and utils.diverse_pick() -- so how often a parent
+    protein gets reused should carry no label information at all. A nonzero
+    NMI here means one class reuses its parents more than the other does, i.e.
+    the provenance asymmetry the PPI pipeline cannot avoid has reappeared.
+
+    Degree is counted over the rows actually scored, and a self-pair counts its
+    parent twice, matching build_train_degree_ratio() above.
+    """
+    parents = [(instance_parent(p1), instance_parent(p2)) for p1, p2 in pairs]
+    deg = defaultdict(int)
+    for a, b in parents:
+        deg[a] += 1
+        deg[b] += 1
+
+    unparsed = sorted({i for pair in pairs for i in pair if instance_parent(i) == i})
+    if unparsed:
+        print(
+            f"  Warning: {len(unparsed)} id(s) are not family_protein_start_end domain instances "
+            f"(e.g. {unparsed[:3]}) -- counted as their own parent",
+            file=sys.stderr,
+        )
+
+    return np.array([(deg[a] + deg[b]) / 2.0 for a, b in parents], dtype=np.float32)
 
 
 def load_species(path):
@@ -132,9 +179,11 @@ def same_species_indicator(pairs, species_map):
 
 
 def build_train_degree_ratio(train_pairs, train_labels):
-    """Return {protein_id: pos_degree / (pos_degree + neg_degree)} from the
-    training split's own labelled pairs. A protein absent from training has
-    no entry (undefined, not zero)."""
+    """Return {node: pos_degree / (pos_degree + neg_degree)} from the
+    training split's own labelled pairs. A node absent from training has
+    no entry (undefined, not zero). The node is a protein in PPI mode and a
+    Pfam family in DDI mode, where main() feeds one entry per distinct
+    (family pair, label) so the ratio matches the family-level DDI graph."""
     pos = defaultdict(int)
     neg = defaultdict(int)
     for (p1, p2), y in zip(train_pairs, train_labels):
@@ -149,14 +198,19 @@ def build_train_degree_ratio(train_pairs, train_labels):
     return ratio
 
 
-def topology_shortcut(pairs, train_degree_ratio):
+def topology_shortcut(node_pairs, train_degree_ratio):
     """Per pair, how exploitable the "topology shortcut" is: each endpoint's
     training positive-rate pos_degree_in_training(p)/pos_plus_neg_degree_in_training(p),
     using whichever endpoint(s) occurred in training (averaged if both did).
     NaN if neither endpoint occurred in training -- the caller drops those
-    pairs, since the shortcut can't apply to a wholly-unseen pair."""
+    pairs, since the shortcut can't apply to a wholly-unseen pair.
+
+    Called with the *node* pair, so this is protein degree in PPI mode and
+    family degree in the DDI graph in DDI mode. Both are the level the shortcut
+    actually lives at: what a model can memorise is "this node is usually
+    positive", and in DDI mode the node the label attaches to is the family."""
     A = []
-    for p1, p2 in pairs:
+    for p1, p2 in node_pairs:
         r1 = train_degree_ratio.get(p1)
         r2 = train_degree_ratio.get(p2)
         if r1 is None and r2 is None:
@@ -170,10 +224,28 @@ def topology_shortcut(pairs, train_degree_ratio):
     return np.array(A, dtype=np.float32)
 
 
+# sklearn's kNN mutual-information estimator ignores every sample whose class has
+# only one member (`_compute_mi_cd`: "Ignore points with unique labels"), so a
+# smaller class than this cannot contribute to the estimate at all.
+MIN_PER_CLASS = 2
+
+
+def smallest_class(y):
+    """Size of the least-populated label in y; 0 for an empty split."""
+    if y.size == 0:
+        return 0
+    return int(np.min(np.unique(y, return_counts=True)[1]))
+
+
 def _prepare_split(pairs, y, embeddings):
-    """Return (X, filtered_pairs, filtered_y) keeping only pairs with embeddings."""
+    """Return (X, filtered_pairs, filtered_y, mask) keeping only pairs with embeddings.
+
+    The mask comes back because DDI mode reads the rows' family pair from the
+    same file separately: dropping a row for a missing embedding has to drop it
+    from both lists or every later row would be scored against its neighbour's
+    family."""
     X, mask = build_pair_X(pairs, embeddings)
-    return X, [p for p, ok in zip(pairs, mask) if ok], y[mask]
+    return X, [p for p, ok in zip(pairs, mask) if ok], y[mask], mask
 
 
 def func_relatedness(pairs, go_anns, category):
@@ -202,7 +274,7 @@ def analyse(A, X, y, name, seed=42, n_bins=10):
     H(A) is estimated by binning A into n_bins equal-width histogram bins
     (or using unique values directly when A is already discrete).
     """
-    discrete_features = name == "self_interactions"
+    discrete_features = name in DISCRETE_ATTRIBUTES
     mi = float(mutual_info_classif(A.reshape(-1, 1), y, discrete_features=discrete_features, random_state=seed)[0])
 
     _, y_counts = np.unique(y, return_counts=True)
@@ -228,16 +300,36 @@ def analyse(A, X, y, name, seed=42, n_bins=10):
     return {"nmi": nmi, "related": nmi > 0, "detectability": detectability}
 
 
+# Every attribute takes the same (row pairs, context) signature; `ctx` carries
+# whichever of the loaded tables and per-split derived views that attribute
+# needs, so adding one does not touch the other eight.
 ATTRIBUTES = {
-    "sequence_similarity": lambda pairs, blast_sim, emb, go, sp, train_deg: seq_sim_within_pair(pairs, blast_sim),
-    "embedding_similarity": lambda pairs, blast_sim, emb, go, sp, train_deg: emb_sim_within_pair(pairs, emb),
-    "functional_relatedness_BP": lambda pairs, blast_sim, emb, go, sp, train_deg: func_relatedness(pairs, go, "BP"),
-    "functional_relatedness_MF": lambda pairs, blast_sim, emb, go, sp, train_deg: func_relatedness(pairs, go, "MF"),
-    "functional_relatedness_CC": lambda pairs, blast_sim, emb, go, sp, train_deg: func_relatedness(pairs, go, "CC"),
-    "self_interactions": lambda pairs, blast_sim, emb, go, sp, train_deg: self_interactions(pairs),
-    "same_species": lambda pairs, blast_sim, emb, go, sp, train_deg: same_species_indicator(pairs, sp),
-    "topology_shortcut": lambda pairs, blast_sim, emb, go, sp, train_deg: topology_shortcut(pairs, train_deg),
+    "sequence_similarity": lambda pairs, ctx: seq_sim_within_pair(pairs, ctx["blast_sim"]),
+    "embedding_similarity": lambda pairs, ctx: emb_sim_within_pair(pairs, ctx["embeddings"]),
+    "functional_relatedness_BP": lambda pairs, ctx: func_relatedness(pairs, ctx["go"], "BP"),
+    "functional_relatedness_MF": lambda pairs, ctx: func_relatedness(pairs, ctx["go"], "MF"),
+    "functional_relatedness_CC": lambda pairs, ctx: func_relatedness(pairs, ctx["go"], "CC"),
+    "same_species": lambda pairs, ctx: same_species_indicator(pairs, ctx["species"]),
+    # One level above the rows: the node pair, i.e. proteins in PPI mode and
+    # Pfam families in DDI mode. Identical computation either way.
+    "self_interactions": lambda pairs, ctx: self_interactions(ctx["node_pairs"]),
+    "topology_shortcut": lambda pairs, ctx: topology_shortcut(ctx["node_pairs"], ctx["train_degree_ratio"]),
+    # DDI mode only -- qc.nf never requests it otherwise.
+    "parent_degree": lambda pairs, ctx: parent_degree(pairs),
 }
+
+# Attributes whose A is binary, so the exact contingency-table estimator beats
+# the kNN one. same_species is deliberately absent: it is continuous-estimated
+# today and moving it would change PPI-mode numbers for no DDI-mode gain.
+#
+# parent_degree is deliberately absent too, and must stay that way: it is
+# (deg[a] + deg[b]) / 2, i.e. dozens of distinct half-integers. Contingency MI on
+# a high-cardinality A is biased upward toward H(y), so with H(A) ~ ln(card) the
+# reported NMI = MI / sqrt(H(A)*H(y)) lands near sqrt(H(y) / ln n) ~ 0.3 on a few
+# hundred rows even when A carries no label information -- which inverts the
+# attribute's whole purpose (see its docstring). sklearn jitters tied continuous
+# features before the kNN estimate, so integral values need no manual binning.
+DISCRETE_ATTRIBUTES = {"self_interactions"}
 
 
 def write_mqc(attribute, results):
@@ -297,10 +389,31 @@ def main():
             sys.exit("--species is required for the same_species attribute")
         species = load_species(args.species)
 
-    train_degree_ratio = None
+    train_degree_ratio, train_fams = None, None
     if args.attribute == "topology_shortcut":
         train_pairs, train_y = read_labelled_csv(args.train)
-        train_degree_ratio = build_train_degree_ratio(train_pairs, train_y)
+        train_fams = read_family_pairs(args.train)
+        if train_fams is None:
+            train_degree_ratio = build_train_degree_ratio(train_pairs, train_y)
+        else:
+            # DDI mode: the shortcut lives on the family DDI graph, so count each
+            # distinct (family pair, label) once. Counting the instance rows
+            # instead would inflate the positive rate -- a positive DDI reaches
+            # the full N examples far more often than a negative family pair does
+            # (EXPAND_NEGATIVES restricts negatives to the split's own protein
+            # universe), so the two classes are not repeated equally.
+            seen, nodes, labels = set(), [], []
+            for fam_pair, label in zip(train_fams, train_y):
+                key = (fam_pair, int(label))
+                if key not in seen:
+                    seen.add(key)
+                    nodes.append(fam_pair)
+                    labels.append(int(label))
+            print(
+                f"  DDI mode: {len(nodes)} distinct family pairs from {len(train_fams)} training rows",
+                file=sys.stderr,
+            )
+            train_degree_ratio = build_train_degree_ratio(nodes, np.array(labels))
 
     split_paths = [
         ("train", args.train),
@@ -313,8 +426,28 @@ def main():
     any_nontrain_qualified = False
     for split, path in split_paths:
         pairs, y = read_labelled_csv(path)
-        X, pairs_f, y_f = _prepare_split(pairs, y, embeddings)
-        A = compute(pairs_f, blast_sim, embeddings, go_anns, species, train_degree_ratio)
+        fam_pairs = read_family_pairs(path)
+        X, pairs_f, y_f, mask = _prepare_split(pairs, y, embeddings)
+
+        # A split can legitimately be empty (a 0 split fraction), or lose every pair to
+        # a missing embedding. Skip it -- the `elif results:` guard below then suppresses
+        # the output file entirely if no split survived, which `optional: true` handles.
+        if X.shape[0] == 0:
+            print(f"  {split}: 0 pairs with embeddings -- skipping", file=sys.stderr)
+            continue
+
+        ctx = {
+            "blast_sim": blast_sim,
+            "embeddings": embeddings,
+            "go": go_anns,
+            "species": species,
+            "train_degree_ratio": train_degree_ratio,
+            # The node pair behind each surviving row: the row itself in PPI
+            # mode, its family pair in DDI mode. Filtered by the same mask as
+            # pairs_f so the two stay index-aligned.
+            "node_pairs": pairs_f if fam_pairs is None else [p for p, ok in zip(fam_pairs, mask) if ok],
+        }
+        A = compute(pairs_f, ctx)
 
         if args.attribute == "topology_shortcut":
             # Only pairs with at least one endpoint seen during training are
@@ -327,20 +460,45 @@ def main():
                 print(f"  {split}: 0 pairs qualify for topology_shortcut (no training overlap)", file=sys.stderr)
                 continue
 
+        # Every class needs MIN_PER_CLASS members for the MI estimate to describe
+        # the split it is reported against. Below that, sklearn drops the whole
+        # class -- and if that empties the array (a one-row split, or one pair of
+        # each label) it raises instead, failing the task. Checked here rather
+        # than beside the X.shape[0] guard above so the topology_shortcut filter,
+        # which drops rows of its own, is covered by the same test.
+        if smallest_class(y_f) < MIN_PER_CLASS:
+            counts = ", ".join(f"{int(c)}x label {int(v)}" for v, c in zip(*np.unique(y_f, return_counts=True)))
+            print(
+                f"  {split}: {X.shape[0]} pairs but only {counts} -- fewer than {MIN_PER_CLASS} in a "
+                "class, so the mutual-information estimate would describe the other class alone; "
+                "skipping this split",
+                file=sys.stderr,
+            )
+            continue
+
         print(f"  {X.shape[0]} {split} pairs retained", file=sys.stderr)
         r = analyse(A, X, y_f, args.attribute, seed=args.seed)
         results.append((split, r))
         print(f"  [{split}] NMI={r['nmi']:.4f}  ρ={r['detectability']:.4f}", file=sys.stderr)
 
     if args.attribute == "topology_shortcut" and not any_nontrain_qualified:
+        node = "Pfam family" if train_fams is not None else "protein"
         print(
-            "  topology_shortcut not applicable: no val/test_balanced/test_realistic "
-            "protein occurs in the training set (expected for leakage-aware splits) "
+            f"  topology_shortcut not applicable: no val/test_balanced/test_realistic "
+            f"{node} occurs in the training set (expected for leakage-aware splits) "
             "-- skipping output.",
             file=sys.stderr,
         )
     elif results:
         write_mqc(args.attribute, results)
+    else:
+        # Reaching here means every split was skipped above. `optional: true` on
+        # the process output already tolerates the missing file, but say so, so a
+        # silently absent bias section is never mistaken for a measured zero.
+        print(
+            f"  {args.attribute}: no split had enough labelled pairs to analyse -- skipping output.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

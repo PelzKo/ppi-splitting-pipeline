@@ -1,8 +1,18 @@
+include { mqcRowLabel } from '../helpers/mqc_labels'
+
+// --id takes the MultiQC display label for the whole row, not meta.id: these
+// tasks run once per row however many negative sets it asked for, and the label
+// is what params.mqc_order names. Report only -- publishDir paths and output
+// filenames below still key off meta.id. See helpers/mqc_labels.nf.
 process SORT_PPIS {
     tag "${meta.id}"
 
     input:
-    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping)
+    // instances is DDI mode's family/clan/instance table, [] in PPI mode. It is
+    // declared LAST because the channel appends it with .join() -- Nextflow
+    // matches tuple elements positionally and never checks, so a slot out of
+    // order silently stages the wrong file.
+    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping), path(instances)
 
     output:
     tuple val(meta), path("train.csv"),   emit: train_ppis
@@ -14,12 +24,14 @@ process SORT_PPIS {
     tuple val(meta), path("*_mqc.tsv"),   emit: mqc, optional: true
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     sort_ppis.py \\
         --ppis         ${ppis} \\
         --partition    ${partition} \\
         --fasta        ${fasta} \\
-        --node_mapping ${node_mapping}
+        --node_mapping ${node_mapping} \\
+        ${inst_arg}
     """
 }
 
@@ -31,7 +43,7 @@ process SPLIT_RANDOM {
     tag "${meta.id}"
 
     input:
-    tuple val(meta), path(ppis), path(fasta)
+    tuple val(meta), path(ppis), path(fasta), path(instances)  // instances last; [] in PPI mode
 
     output:
     tuple val(meta), path("train.csv"),   emit: train_ppis
@@ -43,6 +55,7 @@ process SPLIT_RANDOM {
     tuple val(meta), path("*_mqc.tsv"),   emit: mqc
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     sort_ppis_random.py \\
         --ppis        ${ppis} \\
@@ -51,7 +64,8 @@ process SPLIT_RANDOM {
         --val-split   ${meta.val_split} \\
         --test-split  ${meta.test_split} \\
         --seed        ${params.seed} \\
-        --id          ${meta.id}
+        --id          ${mqcRowLabel(meta)} \\
+        ${inst_arg}
     """
 }
 
@@ -65,15 +79,25 @@ process CDHIT2D {
     tuple val(meta), val(label), path("cdhit.out"), emit: sim
 
     script:
+    // cd-hit-2d errors out on an empty -i or -i2, which happens whenever that side's
+    // split has a 0 fraction (train_split = 0 is odd but permitted, and only ilp and
+    // random read the fractions at all). An empty cdhit.out is the correct answer
+    // either way -- REMOVE_REDUNDANT reads it as "no redundancy found", so a split
+    // with nothing to compare against keeps everything it has -- so guard here rather
+    // than filtering the channel, which would drop the dataset from the 9-way join.
     """
-    cd-hit-2d \\
-        -i  ${db1_fasta} \\
-        -i2 ${db2_fasta} \\
-        -o  cdhit.out \\
-        -c  ${meta.cdhit_identity} \\
-        -n  ${meta.cdhit_wordsize} \\
-        -T  ${task.cpus} \\
-        -M  4000
+    if [ -s ${db1_fasta} ] && [ -s ${db2_fasta} ]; then
+        cd-hit-2d \\
+            -i  ${db1_fasta} \\
+            -i2 ${db2_fasta} \\
+            -o  cdhit.out \\
+            -c  ${meta.cdhit_identity} \\
+            -n  ${meta.cdhit_wordsize} \\
+            -T  ${task.cpus} \\
+            -M  4000
+    else
+        touch cdhit.out
+    fi
     """
 }
 
@@ -83,7 +107,7 @@ process SOLVE_ILP {
     label 'gurobi'
 
     input:
-    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping)
+    tuple val(meta), path(ppis), path(fasta), path(partition), path(node_mapping), path(instances)  // instances last
     path gurobi_license
 
     output:
@@ -97,6 +121,7 @@ process SOLVE_ILP {
 
     script:
     def license_export = gurobi_license ? "export GRB_LICENSE_FILE=\$PWD/${gurobi_license}" : ""
+    def inst_arg       = instances ? "--instances ${instances}" : ''
     """
     ${license_export}
     solve_ilp.py \\
@@ -104,11 +129,92 @@ process SOLVE_ILP {
         --fasta         ${fasta} \\
         --partition     ${partition} \\
         --node_mapping  ${node_mapping} \\
+        ${inst_arg} \\
         --train-split ${meta.train_split} \\
         --val-split   ${meta.val_split} \\
         --test-split  ${meta.test_split} \\
         --epsilon     ${meta.ilp_epsilon} \\
         --max-sec     ${meta.ilp_max_sec} \\
+        --seed        ${params.seed} \\
+        ${params.ilp_solver ? "--solver ${params.ilp_solver}" : ""}
+    """
+}
+
+// DDI mode only. The split CSVs above hold Pfam family pairs; this turns each
+// one into up to N domain-instance pairs and, in the same ILP, claims every
+// parent protein for at most one split. It re-emits the family CSVs
+// because a DDI whose every candidate was blocked ends up with zero examples and
+// is dropped from its split.
+process SELECT_EXAMPLES {
+    publishDir(path: { "${params.outdir}/${meta.id}/examples" }, mode: 'copy', saveAs: { f -> f.endsWith('_mqc.tsv') ? null : f })
+    tag "${meta.id}"
+    label 'error_retry'
+    label 'gurobi'
+
+    input:
+    // instances and candidate_network are the two .join()ed tails, in that order
+    // -- positional and unchecked, so a slot out of place stages the wrong file.
+    tuple val(meta),
+          path(train_ppis), path(val_ppis), path(test_ppis),
+          path(train_fasta), path(val_fasta), path(test_fasta),
+          path(instances), path(candidate_network)
+    path gurobi_license
+
+    output:
+    tuple val(meta), path("train_sel.csv"), emit: train_ppis
+    tuple val(meta), path("val_sel.csv"),   emit: val_ppis
+    tuple val(meta), path("test_sel.csv"),  emit: test_ppis
+    tuple val(meta), path("train_examples.csv"), emit: train_examples
+    tuple val(meta), path("val_examples.csv"),   emit: val_examples
+    tuple val(meta), path("test_examples.csv"),  emit: test_examples
+    tuple val(meta), path("train_universe.txt"), emit: train_universe
+    tuple val(meta), path("val_universe.txt"),   emit: val_universe
+    tuple val(meta), path("test_universe.txt"),  emit: test_universe
+    tuple val(meta), path("train_candidate_examples.csv"), emit: train_candidates
+    tuple val(meta), path("val_candidate_examples.csv"),   emit: val_candidates
+    tuple val(meta), path("test_candidate_examples.csv"),  emit: test_candidates
+    // The parents no candidate ever reached, split three ways here rather than
+    // re-derived per EXPAND_NEGATIVES task: this is the only task that sees all
+    // three splits, so it can weight the partition by realised split size.
+    tuple val(meta), path("train_reserve.txt"), emit: train_reserve
+    tuple val(meta), path("val_reserve.txt"),   emit: val_reserve
+    tuple val(meta), path("test_reserve.txt"),  emit: test_reserve
+    // Their union, published unpartitioned as a diagnostic -- and what
+    // bin/other/check_ddi_invariants.py reads.
+    tuple val(meta), path("unclaimed.txt"), emit: unclaimed
+    tuple val(meta), path("*_mqc.tsv"),     emit: mqc
+
+    script:
+    def license_export = gurobi_license ? "export GRB_LICENSE_FILE=\$PWD/${gurobi_license}" : ""
+    def cand_arg       = candidate_network ? "--candidate-network ${candidate_network}" : ''
+    // split_method=random deliberately puts the same family in several splits so the
+    // naive baseline shows the leak; claiming each parent for one split would repair
+    // part of it, exactly like routing "random" through CD-HIT would.
+    def shared_arg     = meta.split_method == "random" ? "--allow-shared-parents" : ''
+    // Off by default: the solver log is one block per ILP solve, harmless on a
+    // small fixture and a large .command.err at real DDI counts.
+    def verbose_arg    = params.ddi_select_verbose ? '--verbose' : ''
+    """
+    ${license_export}
+    select_examples.py \\
+        --train_ppis  ${train_ppis} \\
+        --val_ppis    ${val_ppis} \\
+        --test_ppis   ${test_ppis} \\
+        --train_fasta ${train_fasta} \\
+        --val_fasta   ${val_fasta} \\
+        --test_fasta  ${test_fasta} \\
+        --instances   ${instances} \\
+        ${cand_arg} \\
+        ${shared_arg} \\
+        --examples-target   ${params.ddi_examples_target} \\
+        --shortlist-factor  ${params.ddi_shortlist_factor} \\
+        --candidate-factor  ${params.ddi_candidate_factor} \\
+        --lambda-diversity  ${params.ddi_lambda_diversity} \\
+        --max-sec              ${params.ddi_select_max_sec} \\
+        --max-ilp-candidates   ${params.ddi_max_ilp_candidates} \\
+        --seed              ${params.seed} \\
+        --id                ${mqcRowLabel(meta)} \\
+        ${verbose_arg} \\
         ${params.ilp_solver ? "--solver ${params.ilp_solver}" : ""}
     """
 }
@@ -122,7 +228,8 @@ process REMOVE_REDUNDANT {
           path(train_ppis), path(val_ppis), path(test_ppis),
           path(train_fasta), path(val_fasta), path(test_fasta),
           path(sim_train_val,  stageAs: 'sim_train_val.out'),
-          path(sim_train_test, stageAs: 'sim_train_test.out')
+          path(sim_train_test, stageAs: 'sim_train_test.out'),
+          path(instances)  // DDI mode's instances.tsv, [] in PPI mode -- LAST, matching the .join() order
 
     output:
     tuple val(meta), path("train_nr.csv"),   emit: train_ppis
@@ -134,6 +241,7 @@ process REMOVE_REDUNDANT {
     tuple val(meta), path("*_mqc.tsv"),      emit: mqc
 
     script:
+    def inst_arg = instances ? "--instances ${instances}" : ''
     """
     remove_redundant.py \\
         --ppis           ${orig_ppis} \\
@@ -145,6 +253,7 @@ process REMOVE_REDUNDANT {
         --test_fasta     ${test_fasta} \\
         --sim_train_val  ${sim_train_val} \\
         --sim_train_test ${sim_train_test} \\
-        --id             ${meta.id}
+        --id             ${mqcRowLabel(meta)} \\
+        ${inst_arg}
     """
 }

@@ -1,0 +1,134 @@
+include { EMPTY_GO_ANNOTATIONS; FETCH_DOMAIN_META; GET_LENGTHS as GET_LENGTHS_DDI; GET_LENGTHS as GET_LENGTHS_SHARED_DDI; SUBSET_DOMAIN_DATA } from '../processes/data_prep'
+
+// DATA_PREP's DDI-mode counterpart: turns the Pfam family accessions in the
+// interaction file's protein1/protein2 columns into sampled domain instances
+// (sequences, species, lengths) plus instances.tsv, the table mapping every
+// instance back to its family, clan and parent protein.
+//
+// Same shape as DATA_PREP -- datasets needing a fetch are deduplicated into one
+// union of family ids, fetched once under a synthetic "_shared" meta, then
+// split back out per dataset -- and it emits the same channel names, which is
+// what lets main.nf pick between the two with a branch instead of a second
+// pipeline. `instances` is the one addition; DATA_PREP emits it as [].
+workflow DATA_PREP_DDI {
+    take:
+    datasets_ch  // tuple(meta, files) -- reads files.ppis (Pfam family accessions here), .sequences, .species, .domain_instances
+
+    main:
+    // The precomputed hatch is all-or-nothing, so a row that supplies two of the
+    // three files would fall into needs_fetch, ignore both, and stream 6.3 GB
+    // from EBI -- a correct result by a route nobody asked for, hours later and
+    // silently. Fail loudly instead, wording it like main.nf's --split_only check.
+    checked_ch = datasets_ch.map { meta, f ->
+        def supplied = [sequences: f.sequences, species: f.species, domain_instances: f.domain_instances]
+        def missing  = supplied.findAll { k, v -> !v }.keySet()
+        if (missing && missing.size() < supplied.size()) {
+            error("--ddi_mode precomputed data prep needs sequences, species and domain_instances together (row '${meta.id}' supplies ${(supplied.keySet() - missing).join(', ')} but is missing ${missing.join(', ')}). Leave all three blank to fetch them from Pfam instead.")
+        }
+        tuple(meta, f)
+    }
+
+    // GO annotations are not part of this mode (they describe proteins, not
+    // domain families), so unlike DATA_PREP's three-way gate the precomputed
+    // hatch asks only for the files that cannot be derived.
+    branched = checked_ch.branch { meta, f ->
+        precomputed: f.sequences && f.species && f.domain_instances
+            return tuple(meta, f.sequences, f.species, f.domain_instances)
+        needs_fetch: true
+            return tuple(meta, f.ppis)
+    }
+
+    precomputed_sequences = branched.precomputed.map { meta, sequences, species, domain_instances -> tuple(meta, sequences) }
+    precomputed_species   = branched.precomputed.map { meta, sequences, species, domain_instances -> tuple(meta, species) }
+    precomputed_instances = branched.precomputed.map { meta, sequences, species, domain_instances -> tuple(meta, domain_instances) }
+    precomputed_lengths   = GET_LENGTHS_DDI(precomputed_sequences)
+    precomputed_go        = EMPTY_GO_ANNOTATIONS(branched.precomputed.map { meta, sequences, species, domain_instances -> meta })
+
+    // Same accession-pooling flatMap as DATA_PREP: DDI input reuses the
+    // protein1/protein2 column names, the values are just Pfam accessions.
+    families_list = branched.needs_fetch
+        .flatMap { meta, ddis -> ddis.splitCsv(header: true).collectMany { row -> [row.protein1.trim(), row.protein2.trim()] } }
+        .unique()
+        .collectFile(name: 'families.txt', newLine: true, sort: true)
+
+    // Pfam-A.clans.tsv and Pfam-A.fasta.gz are release-wide reference files
+    // consumed by the one shared task, so they are run-global params rather than
+    // samplesheet columns -- same idiom as gurobi_license in SPLIT_POSITIVES.
+    // Both are staged as path inputs, which is what gets them checkIfExists and a
+    // place in the task hash, and what makes them work on any executor.
+    clans_ch = params.pfam_clans
+        ? channel.value(file(params.pfam_clans, checkIfExists: true))
+        : channel.value([])
+
+    regions_ch = params.pfam_regions
+        ? channel.value(file(params.pfam_regions, checkIfExists: true))
+        : channel.value([])
+
+    // The protein universe: Pfam-A.regions carries coordinates only, so sequence
+    // and taxon come from the Swiss-Prot flat file, and membership in it is what
+    // "reviewed" means. Staged like the other two so it lands in the task hash.
+    dat_ch = params.uniprot_dat
+        ? channel.value(file(params.uniprot_dat, checkIfExists: true))
+        : channel.value([])
+
+    // The cache is the exception: FETCH_DOMAIN_META *writes* to it, so it cannot
+    // be staged, and a relative path would resolve inside the task's work dir and
+    // be deleted with it -- making the documented "--interpro_cache makes re-runs
+    // cheap" quietly untrue. Absolutised here. It must also be a filesystem every
+    // compute node shares; on node-local scratch each task gets its own cold cache.
+    cache_dir = params.interpro_cache ? file(params.interpro_cache).toAbsolutePath().toString() : ''
+    if (cache_dir && !file(cache_dir).exists()) {
+        log.warn "--interpro_cache ${cache_dir} does not exist yet; FETCH_DOMAIN_META will create it."
+    }
+
+    // FETCH_DOMAIN_META reads --instance_tier straight from params (so an
+    // embedding pipeline needs no wiring for it), which puts the value past
+    // channel construction and into fetch_domains.py's argparse. Check it here
+    // instead: a typo should not survive as far as a scheduled task.
+    if (!(params.instance_tier in ['any', 'human_only'])) {
+        error("--instance_tier must be 'any' or 'human_only', got '${params.instance_tier}'.")
+    }
+    if (params.instance_tier == 'human_only') {
+        log.info "--instance_tier human_only: families with no human Pfam region keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
+    }
+    // Without a cache there is nowhere to put the ~600 MB flat file, and
+    // fetch_domains.py fails on that rather than re-downloading it per attempt.
+    if (!params.uniprot_dat && !params.interpro_cache) {
+        error(
+            "DDI mode needs the Swiss-Prot flat file as its protein universe. Set --uniprot_dat to a local uniprot_sprot.dat.gz, or --interpro_cache to a shared directory it can be cached in."
+        )
+    }
+
+    shared_fetch   = FETCH_DOMAIN_META(
+        families_list.map { families -> tuple([id: "_shared"], families) },
+        clans_ch,
+        regions_ch,
+        dat_ch,
+        channel.value(cache_dir),
+    )
+    shared_lengths = GET_LENGTHS_SHARED_DDI(shared_fetch.sequences)
+
+    subset_out = SUBSET_DOMAIN_DATA(
+        branched.needs_fetch,
+        shared_fetch.sequences.map       { meta, f -> f }.first(),
+        shared_fetch.go_annotations.map  { meta, f -> f }.first(),
+        shared_fetch.species.map         { meta, f -> f }.first(),
+        shared_lengths.map                { meta, f -> f }.first(),
+        shared_fetch.instances.map       { meta, f -> f }.first(),
+    )
+
+    emit:
+    sequences      = precomputed_sequences.mix(subset_out.sequences)
+    go_annotations = precomputed_go.mix(subset_out.go_annotations)
+    species        = precomputed_species.mix(subset_out.species)
+    lengths        = precomputed_lengths.mix(subset_out.lengths)
+    instances      = precomputed_instances.mix(subset_out.instances)
+    // The one artefact that explains a shrunken DDI count, so an embedding
+    // pipeline gets a channel rather than a hardcoded results/_shared/data/ path.
+    // Two properties to respect: the fetch runs once per run under the synthetic
+    // [id: "_shared"] meta, so this carries at most one item whose meta matches no
+    // dataset -- join() it against a per-dataset channel and you get zero items --
+    // and it is legitimately empty when every dataset supplied precomputed domain
+    // data, so nothing may block on it.
+    dropped_families = shared_fetch.dropped_families
+}
