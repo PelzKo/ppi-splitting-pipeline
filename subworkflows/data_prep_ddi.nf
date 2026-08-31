@@ -91,13 +91,11 @@ workflow DATA_PREP_DDI {
     if (params.instance_tier == 'human_only') {
         log.info "--instance_tier human_only: families with no human Pfam region keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
     }
-    // Without a cache there is nowhere to put the ~600 MB flat file, and
-    // fetch_domains.py fails on that rather than re-downloading it per attempt.
-    if (!params.uniprot_dat && !params.interpro_cache) {
-        error(
-            "DDI mode needs the Swiss-Prot flat file as its protein universe. Set --uniprot_dat to a local uniprot_sprot.dat.gz, or --interpro_cache to a shared directory it can be cached in."
-        )
-    }
+    // No guard here on --uniprot_dat / --interpro_cache. This block runs on *every*
+    // DDI-mode workflow, including an embedding pipeline that supplies precomputed
+    // instances and never reaches FETCH_DOMAIN_META at all -- for which the flat
+    // file is irrelevant and demanding it would be a false failure. fetch_domains.py
+    // raises the same error itself, on the only path that actually needs the file.
 
     shared_fetch   = FETCH_DOMAIN_META(
         families_list.map { families -> tuple([id: "_shared"], families) },
