@@ -1,6 +1,69 @@
 #!/usr/bin/env nextflow
 nextflow.enable.dsl=2
 
+/*
+ * TYPED PARAMETER DECLARATIONS
+ *
+ * Types only -- every default stays in conf/params.config, which remains "every
+ * parameter of the pipeline, and nothing else".
+ *
+ * Nextflow's v2 (strict) parser, the default since 26.x, stopped inferring types
+ * for command-line parameters. `--seed 7` arrives as the String "7" and
+ * `--split_only false` as the String "false". This pipeline never calls
+ * validateParameters(), so nothing rejects them -- they flow straight into the
+ * code, where `if (params.split_only)` on the String "false" is *true* and a
+ * numeric override silently becomes a string in a meta map and a task hash.
+ * Declaring the type makes Nextflow coerce the value before any of that.
+ *
+ * Only the *entry* script's declarations count. A pipeline that includes
+ * PPI_SPLITTING as a subworkflow does not get this block -- same rule as the
+ * params in conf/params.config, which is why that file is separated out in the
+ * first place -- so an embedding pipeline has to repeat these declarations in
+ * its own main.nf. daisybio/domainsplit does.
+ *
+ * `Float`, not `Double`/`BigDecimal`/`Number`: those reject the String outright
+ * instead of coercing it. `mqc_order` is deliberately absent -- resolveMqcOrder()
+ * accepts both a list and a comma-separated string on purpose.
+ */
+params {
+    split_only: Boolean
+    seed: Integer
+    heatmap_max_per_split: Integer
+
+    // clustering
+    cdhit_identity: Float
+    cdhit_wordsize: Integer
+    kahip_seed: Integer
+    kahip_k: Integer
+    ilp_kahip_k: Integer
+
+    // positive split
+    train_split: Float
+    val_split: Float
+    test_split: Float
+    ilp_epsilon: Float
+    ilp_max_sec: Integer
+
+    // negative sampling
+    neg_ilp_lambda_degree: Float
+    neg_ilp_lambda_taxon_pair: Float
+    neg_ilp_lambda_self_loop: Float
+    neg_ilp_lambda_jaccard: Float
+    neg_ilp_time_limit: Integer
+    neg_ilp_mip_gap: Float
+
+    // DDI mode
+    ddi_mode: Boolean
+    ddi_examples_target: Integer
+    ddi_examples_pool_factor: Integer
+    ddi_select_max_sec: Integer
+    ddi_max_ilp_candidates: Integer
+    ddi_lambda_diversity: Float
+    ddi_shortlist_factor: Integer
+    ddi_select_verbose: Boolean
+    ddi_candidate_factor: Integer
+}
+
 include { samplesheetToList } from 'plugin/nf-schema'
 
 include { DATA_PREP }        from './subworkflows/data_prep'
