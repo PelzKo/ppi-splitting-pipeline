@@ -60,8 +60,15 @@ workflow DATA_PREP_DDI {
         ? channel.value(file(params.pfam_clans, checkIfExists: true))
         : channel.value([])
 
-    fasta_ch = params.pfam_fasta
-        ? channel.value(file(params.pfam_fasta, checkIfExists: true))
+    regions_ch = params.pfam_regions
+        ? channel.value(file(params.pfam_regions, checkIfExists: true))
+        : channel.value([])
+
+    // The protein universe: Pfam-A.regions carries coordinates only, so sequence
+    // and taxon come from the Swiss-Prot flat file, and membership in it is what
+    // "reviewed" means. Staged like the other two so it lands in the task hash.
+    dat_ch = params.uniprot_dat
+        ? channel.value(file(params.uniprot_dat, checkIfExists: true))
         : channel.value([])
 
     // The cache is the exception: FETCH_DOMAIN_META *writes* to it, so it cannot
@@ -82,13 +89,23 @@ workflow DATA_PREP_DDI {
         error("--instance_tier must be 'any' or 'human_only', got '${params.instance_tier}'.")
     }
     if (params.instance_tier == 'human_only') {
-        log.info "--instance_tier human_only: families with no human Pfam instance keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
+        log.info "--instance_tier human_only: families with no human Pfam region keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
+    }
+    // Without a cache there is nowhere to put the ~600 MB flat file, and
+    // fetch_domains.py fails on that rather than re-downloading it per attempt.
+    if (!params.uniprot_dat && !params.interpro_cache) {
+        error(
+            "DDI mode needs the Swiss-Prot flat file as its protein universe. Set "
+            + "--uniprot_dat to a local uniprot_sprot.dat.gz, or --interpro_cache to a "
+            + "shared directory it can be cached in."
+        )
     }
 
     shared_fetch   = FETCH_DOMAIN_META(
         families_list.map { families -> tuple([id: "_shared"], families) },
         clans_ch,
-        fasta_ch,
+        regions_ch,
+        dat_ch,
         channel.value(cache_dir),
     )
     shared_lengths = GET_LENGTHS_SHARED_DDI(shared_fetch.sequences)

@@ -22,16 +22,17 @@ process FETCH_DATA {
 process FETCH_DOMAIN_META {
     publishDir(path: { "${params.outdir}/${meta.id}/data" }, mode: 'copy')
     tag "${meta.id}"
-    // One ~6.3 GB stream and no checkpoint. _open_url's own retry loop covers
+    // One ~4.7 GB stream and no checkpoint. _open_url's own retry loop covers
     // the open only: a mid-stream truncation surfaces as an EOFError out of the
     // gzip reader and kills the task, so without this label one EBI hiccup takes
-    // out a six-hour job and everything downstream of it.
+    // out a long job and everything downstream of it.
     label 'error_retry'
 
     input:
     tuple val(meta), path(families)  // plain text, one Pfam family accession per line
     path clans                       // Pfam-A.clans.tsv(.gz), or [] to download it
-    path pfam_fasta                  // local Pfam-A.fasta.gz, or [] to stream it from EBI
+    path pfam_regions                // local Pfam-A.regions.tsv.gz, or [] to stream it from EBI
+    path uniprot_dat                 // local uniprot_sprot.dat.gz, or [] to download it
     val cache_dir                    // absolute cache directory, or '' for no cache
 
     output:
@@ -48,7 +49,8 @@ process FETCH_DOMAIN_META {
     script:
     def pool_size   = (params.ddi_examples_target as int) * (params.ddi_examples_pool_factor as int)
     def clans_arg   = clans      ? "--clans ${clans}"           : ''
-    def fasta_arg   = pfam_fasta ? "--pfam-fasta ${pfam_fasta}" : ''
+    def regions_arg = pfam_regions ? "--pfam-regions ${pfam_regions}" : ''
+    def dat_arg     = uniprot_dat  ? "--uniprot-dat ${uniprot_dat}"   : ''
     // The one input that cannot be staged, because the task writes to it: a
     // relative --interpro-cache would resolve inside the work directory and be
     // thrown away with it. DATA_PREP_DDI absolutises the param for that reason.
@@ -62,7 +64,8 @@ process FETCH_DOMAIN_META {
         --tier      ${params.instance_tier} \\
         ${clans_arg} \\
         ${cache_arg} \\
-        ${fasta_arg} \\
+        ${regions_arg} \\
+        ${dat_arg} \\
         ${release_arg}
     """
 }
