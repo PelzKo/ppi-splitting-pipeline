@@ -95,9 +95,7 @@ workflow DATA_PREP_DDI {
     // fetch_domains.py fails on that rather than re-downloading it per attempt.
     if (!params.uniprot_dat && !params.interpro_cache) {
         error(
-            "DDI mode needs the Swiss-Prot flat file as its protein universe. Set "
-            + "--uniprot_dat to a local uniprot_sprot.dat.gz, or --interpro_cache to a "
-            + "shared directory it can be cached in."
+            "DDI mode needs the Swiss-Prot flat file as its protein universe. Set --uniprot_dat to a local uniprot_sprot.dat.gz, or --interpro_cache to a shared directory it can be cached in."
         )
     }
 
