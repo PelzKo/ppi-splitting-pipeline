@@ -1,3 +1,9 @@
+include { mqcRowLabel } from '../helpers/mqc_labels'
+
+// --id takes the MultiQC display label for the whole row, not meta.id: these
+// tasks run once per row however many negative sets it asked for, and the label
+// is what params.mqc_order names. Report only -- publishDir paths and output
+// filenames below still key off meta.id. See helpers/mqc_labels.nf.
 process SORT_PPIS {
     tag "${meta.id}"
 
@@ -58,7 +64,7 @@ process SPLIT_RANDOM {
         --val-split   ${meta.val_split} \\
         --test-split  ${meta.test_split} \\
         --seed        ${params.seed} \\
-        --id          ${meta.id} \\
+        --id          ${mqcRowLabel(meta)} \\
         ${inst_arg}
     """
 }
@@ -207,7 +213,7 @@ process SELECT_EXAMPLES {
         --max-sec              ${params.ddi_select_max_sec} \\
         --max-ilp-candidates   ${params.ddi_max_ilp_candidates} \\
         --seed              ${params.seed} \\
-        --id                ${meta.id} \\
+        --id                ${mqcRowLabel(meta)} \\
         ${verbose_arg} \\
         ${params.ilp_solver ? "--solver ${params.ilp_solver}" : ""}
     """
@@ -247,7 +253,7 @@ process REMOVE_REDUNDANT {
         --test_fasta     ${test_fasta} \\
         --sim_train_val  ${sim_train_val} \\
         --sim_train_test ${sim_train_test} \\
-        --id             ${meta.id} \\
+        --id             ${mqcRowLabel(meta)} \\
         ${inst_arg}
     """
 }

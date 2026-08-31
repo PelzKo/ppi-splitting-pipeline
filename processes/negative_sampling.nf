@@ -1,9 +1,14 @@
+include { mqcLabel } from '../helpers/mqc_labels'
+
 // nsuffix is "" for a row asking for a single negative set and "_<negset>"
 // otherwise, computed once in subworkflows/sample_negatives.nf. It goes on the
-// output filename and on the MultiQC id, but never on --split-name: that string
-// is looked up in utils.SPLIT_SORT_KEY, which is what forces train -> val -> test
-// order in the report, and an unknown key would sort the negative sets' rows into
-// each other.
+// output filename, but never on --split-name: that string is looked up in
+// utils.SPLIT_ORDER, which is what forces train -> val -> test order in the
+// report, and an unknown key would sort the negative sets' rows into each other.
+//
+// --id takes the MultiQC *display* label instead of "${meta.id}${nsuffix}", so an
+// embedding pipeline can name the report's rows in its own vocabulary. The two
+// coincide unless the caller supplied meta.mqc_labels -- see helpers/mqc_labels.nf.
 process SAMPLE_NEGATIVES_DEGREE {
     publishDir(path: { "${params.outdir}/${meta.id}" }, mode: 'copy', saveAs: { f -> f.endsWith('_mqc.tsv') ? null : f })
     tag "${meta.id}${nsuffix}_${label}"
@@ -29,7 +34,7 @@ process SAMPLE_NEGATIVES_DEGREE {
         --ratio      ${ratio} \\
         ${uniform_flag} \\
         --seed       ${params.seed} \\
-        --id         ${meta.id}${nsuffix}
+        --id         ${mqcLabel(meta, negset)}
     """
 }
 
@@ -79,7 +84,7 @@ process SAMPLE_NEGATIVES_ILP {
         --residuals-out      ${label}_residuals_mqc.tsv \\
         --max-candidates     \$max_candidates \\
         --verbose \\
-        --id                 ${meta.id}${nsuffix}
+        --id                 ${mqcLabel(meta, negset)}
     """
 }
 
@@ -126,6 +131,6 @@ process EXPAND_NEGATIVES {
         --split-name         ${label} \\
         --examples-target    ${params.ddi_examples_target} \\
         --seed               ${params.seed} \\
-        --id                 ${meta.id}${nsuffix}
+        --id                 ${mqcLabel(meta, negset)}
     """
 }

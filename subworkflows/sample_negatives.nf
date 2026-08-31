@@ -1,10 +1,12 @@
 include { SAMPLE_NEGATIVES_DEGREE; SAMPLE_NEGATIVES_ILP; EXPAND_NEGATIVES } from '../processes/negative_sampling'
 
-// "" when the row asked for a single negative set -- so every filename and
-// MultiQC sample name is byte-identical to what the pipeline produced before the
-// fan-out existed -- and "_<negset>" when it asked for several. The same rule is
-// re-derived from meta in processes/training.nf and subworkflows/qc.nf, which see
-// one negative set at a time rather than the whole list; keep the three in step.
+// "" when the row asked for a single negative set -- so every output filename is
+// byte-identical to what the pipeline produced before the fan-out existed -- and
+// "_<negset>" when it asked for several.
+//
+// Output filenames only. The same rule, keyed off meta rather than the list, is
+// the fallback inside helpers/mqc_labels.nf's mqcLabel(), which is what names the
+// MultiQC rows -- so a caller can rename those without touching any path.
 def negsuffix(negsets, negset) {
     negsets.size() > 1 ? "_${negset}" : ""
 }

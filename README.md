@@ -162,9 +162,16 @@ family degree in the DDI graph rather than protein degree.
 
 **SIMILARITY_HEATMAP** — Plots a heatmap of pairwise BLASTp similarity between proteins in different splits, to visualize the degree of leakage.
 
-**DDI_ATTRITION** — DDI mode only. One stacked bar per dataset accounting for every input DDI: discarded cross-cluster by the partitioner, removed by CD-HIT-2D, dropped because no domain-instance example was left for it, or kept. The counts are read back out of the DDI Partitioning and DDI Example Selection bars rather than re-derived, so the waterfall and the per-stage charts cannot disagree.
+**DDI_ATTRITION** — DDI mode only. One stacked bar per dataset accounting for every DDI that reached the splitting stage: discarded cross-cluster by the partitioner, removed by CD-HIT-2D, dropped because no domain-instance example was left for it, or kept. The counts are read back out of the DDI Partitioning and DDI Example Selection bars rather than re-derived, so the waterfall and the per-stage charts cannot disagree. The section is titled **DDI Attrition (within splitting)** because that is its scope: the four series sum to the DDIs handed to this pipeline in its `ppis` input, so DDIs a caller filtered out beforehand — by `--instance_tier human_only`, say — are outside the chart and remain the caller's to account for.
 
 **MULTIQC** — Collects every dataset's `*_mqc.tsv`/`*_mqc.html` files into one combined report for the whole run (`results/multiqc/`). Per-attribute bias tables are excluded (the bias-scatter plot supersedes them); General Statistics, Classifier Performance, Positive vs Negative Pairs, and (in DDI mode) DDI Instance Expansion and DDI Attrition are merged across datasets (qualified sample names + an `ID` column); PPI/DDI Partitioning, DDI Example Selection, the similarity heatmap, and the bias-scatter plot remain one separate panel per dataset.
+
+Before MultiQC runs, `relabel_mqc.py` applies the run's display order. It is the only step that sees the whole run, which is what the ordering needs: MultiQC sorts samples alphabetically and discovers custom-content sections in the order they are staged, so neither the datasets nor the sections can order themselves. It rewrites each file in place-of-copy and writes a `multiqc_config.yml` carrying `report_section_order`:
+
+- **Sample rows** become `<NN>_<label>_<split>` — a 1-based index into (dataset order × `train, val, test, test_balanced, test_realistic, discarded`), zero-padded to the run's width. Rows that report a whole dataset rather than a split (Classifier Performance, DDI Attrition) become `<NN>_<label>`, padded to the dataset count alone. Bar-chart categories inside a single dataset's own chart keep their plain `1_train` form: only the intra-dataset order is at stake there.
+- **Sections** are ordered cross-dataset summaries first (General Statistics, Positive vs Negative Pairs, Classifier Performance, DDI Instance Expansion, the ILP diagnostics, DDI Attrition), then one per-dataset kind at a time — Partitioning, DDI Example Selection, bias scatter, similarity heatmap — with the datasets inside each in the resolved order. Per-dataset section ids gain the same dataset index (`split_bar_02_minimal_leakage`); shared section ids are left exactly as they were, so external references to them survive.
+
+`--mqc_order` sets the dataset order; `meta.mqc_labels` sets the labels. Both are report-only — see [Naming and ordering the report](#naming-and-ordering-the-report). Nothing here touches a published filename, a publish directory, or a `--split-name` value.
 
 ---
 
@@ -695,12 +702,95 @@ so.
 **MultiQC.** With several sets, the negative-sampling, classifier and bias
 sections tag their samples `<id>_<negset>` so the sets do not overlay each other
 in one chart; the splitting-stage sections and the DDI attrition waterfall stay
-per-dataset, because that stage runs once per row. `test_realistic`'s
-negative-sampling row appears once, under the plain dataset id.
+per-dataset, because that stage runs once per row — and take the *first* set's
+label, since a row produces one of them and several labels. `test_realistic`'s
+negative-sampling row likewise appears once, under that same first-set label; the
+file on disk stays the unsuffixed `test_realistic.csv` either way. Each of a row's
+sets is a separate entry in `--mqc_order`, and `meta.mqc_labels` can give each of
+them its own display name; see
+[Naming and ordering the report](#naming-and-ordering-the-report).
 
 `bin/other/check_ddi_invariants.py` understands the suffixed layout and adds one
 check for it: every negative set of a row must carry the same positive rows in
 every split.
+
+---
+
+## Naming and ordering the report
+
+Two knobs control how the MultiQC report reads. Both affect the report only: no
+published filename, no publish directory and no `--split-name` value depends on
+either, so a downstream consumer that joins on paths is unaffected.
+
+### `--mqc_order`: which dataset comes first
+
+MultiQC sorts samples alphabetically, which puts the datasets in alphabetical
+order of their id — never the order a reader wants. `--mqc_order` names them
+instead:
+
+```bash
+nextflow run main.nf --samplesheet s.csv \
+    --mqc_order 'random,minimal_leakage,external_test'
+```
+
+In a config file it is a list (`mqc_order = ['random', 'minimal_leakage']`); on
+the command line, a comma-separated string. The names are **display labels**, one
+per (samplesheet row, negative set) — so a row asking for two negative sets
+contributes two names. Every rule here is advisory, warned about on stderr and in
+`.nextflow.log`, and never fatal:
+
+- a name matching no dataset is ignored, and the labels that *do* exist are listed
+  so a typo is obvious;
+- a name given twice keeps its first position;
+- a dataset the list does not mention is appended after the listed ones,
+  alphabetically — so a partial order is still a total one;
+- the default, `[]`, is alphabetical.
+
+`bin/relabel_mqc.py` then turns the resolved order into the numeric prefixes
+MultiQC sorts on, and into the `report_section_order` config that fixes the
+section order — see the **MULTIQC** step above for the exact shapes.
+
+### `meta.mqc_labels`: what each dataset is called
+
+A row asking for several negative sets gets a `_<negset>` suffix on its display
+label, so the report says `minimal_leakage_ilp_candidates` where the pipeline that
+drove the run may call that dataset something else entirely. `meta.mqc_labels` is
+an optional per-dataset map from negative-set name to display label:
+
+```groovy
+[ id: 'minimal_leakage',
+  negative_sampling_method: 'ilp,ilp_candidates',
+  mqc_labels: [ 'ilp': 'minimal_leakage', 'ilp_candidates': 'minimal_leakage_hcni' ],
+  /* ...every other meta key... */ ]
+```
+
+It is only reachable from an including pipeline — there is no samplesheet column
+for it, which is exactly why a standalone run's labels, and therefore every task
+hash, are unchanged. An absent key, a non-map value, or a negative set the map
+does not cover falls back to `<id><negset suffix>`; a map whose keys do not match
+the row's negative sets is warned about and the uncovered sets fall back
+individually. Like every other `meta` key it must be set when `meta` is built and
+never mutated, because every `join()`/`combine(by: 0)` in the pipeline keys on the
+whole map.
+
+Artefacts that belong to the whole row rather than to one negative set — the
+partitioning bars, the DDI example-selection tables, the similarity heatmap, the
+DDI attrition waterfall — run once per row and take the **first** negative set's
+label.
+
+Putting the two together, for a run of three rows and five negative sets:
+
+```groovy
+mqc_labels: ['uniform': 'random']                                                  // row 1
+mqc_labels: ['ilp': 'minimal_leakage', 'ilp_candidates': 'minimal_leakage_hcni']    // row 2
+mqc_labels: ['ilp': 'external_test',   'ilp_candidates': 'external_test_hcni']      // row 3
+
+mqc_order = ['random', 'minimal_leakage', 'minimal_leakage_hcni',
+             'external_test', 'external_test_hcni']
+```
+
+5 labels × 6 splits = 30, so the width is 2 and the rows run
+`01_random_train` … `30_external_test_hcni_discarded`.
 
 ---
 
@@ -754,7 +844,9 @@ Three things to get right:
    read `meta.split_method`, `meta.cdhit_identity` and the rest directly, and a
    missing key surfaces as a null in a rendered command line, not as an error.
    `meta` must also not be mutated afterwards: every `join()`/`combine(by: 0)` in
-   the pipeline keys on the whole map.
+   the pipeline keys on the whole map. One key is available *only* here and is
+   optional: `mqc_labels`, which names the MultiQC rows in your own vocabulary —
+   see [Naming and ordering the report](#naming-and-ordering-the-report).
 2. **`filesMap` must have all nine keys.** An absent optional file is `[]`, never
    `null` — a `path` input accepts `[]` as "no file" and `null` breaks staging.
 3. **Include `conf/params.config`**, before your own `params { }` block:

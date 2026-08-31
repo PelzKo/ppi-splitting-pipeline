@@ -2,10 +2,16 @@
 """
 DDI mode: one attrition waterfall per dataset, from the splitting stage's own bars.
 
-Every input DDI ends up in exactly one of four buckets, and each is already
-counted by a MultiQC bar written upstream -- so this reduces those bars rather
-than re-deriving anything, which is what stops the waterfall and the per-stage
-charts from disagreeing:
+Scope: "input" here means the DDIs this pipeline received in its `ppis` input,
+not the caller's full DDI universe. A caller that filtered DDIs out before
+handing them over -- by `instance_tier`, say, which drops every DDI touching a
+family with no eligible domain instance -- must account for those itself; they
+are outside this chart entirely, and the four series below sum to what arrived.
+
+Every DDI that did arrive ends up in exactly one of four buckets, and each is
+already counted by a MultiQC bar written upstream -- so this reduces those bars
+rather than re-deriving anything, which is what stops the waterfall and the
+per-stage charts from disagreeing:
 
     discarded (cross-cluster)   the partitioner put the DDI's two families in
                                 different clusters   [sort_ppis.py / remove_redundant.py]
@@ -35,7 +41,12 @@ ddi_attrition_mqc.tsv  -- one bargraph row for this dataset; MultiQC merges the
 """
 
 import argparse
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from utils import mqc_dataset  # noqa: E402
 
 _PARTITION_MARKER = "Discarded (KaHIP/ILP)"
 _SELECTION_MARKER = "Dropped (0 examples)"
@@ -129,21 +140,29 @@ def collect(paths):
 def write_mqc(stats, id_):
     with open("ddi_attrition_mqc.tsv", "w") as fh:
         fh.write(
+            # The id is deliberately unchanged and carries no dataset component:
+            # MultiQC merges every dataset into this one section, and external
+            # references to the id may exist. Its position in the report comes
+            # from the config bin/relabel_mqc.py writes.
             "# id: 'ddi_attrition'\n"
-            "# section_name: 'DDI Attrition'\n"
-            "# description: 'Where every input DDI went, one bar per dataset. Discarded "
-            "cross-cluster means the partitioner put the two Pfam families in different "
-            "clusters; discarded by CD-HIT-2D means a family lost an instance to redundancy "
-            "filtering; dropped (no example) means the DDI survived splitting but reached zero "
-            "domain-instance examples, because another split already had its parent proteins or "
-            "the family had no usable instance. The four series sum to the input DDI count.'\n"
+            "# section_name: 'DDI Attrition (within splitting)'\n"
+            "# description: 'Where every DDI went inside the splitting stage, one bar per "
+            "dataset. Discarded cross-cluster means the partitioner put the two Pfam families "
+            "in different clusters; discarded by CD-HIT-2D means a family lost an instance to "
+            "redundancy filtering; dropped (no example) means the DDI survived splitting but "
+            "reached zero domain-instance examples, because another split already had its "
+            "parent proteins or the family had no usable instance. The four series sum to the "
+            "DDIs this pipeline received in its ppis input -- DDIs the caller filtered out "
+            "before handing them over, for example by instance_tier, are outside this chart "
+            "and must be accounted for by the caller.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             "#     id: 'ddi_attrition_plot'\n"
             "#     title: 'DDI Attrition: where the input DDIs went'\n"
             "#     ylab: '# DDIs'\n"
             "Sample\tKept\tDiscarded (cross-cluster)\tDiscarded (CD-HIT-2D)\tDropped (no example)\n"
-            f"{id_}\t{stats['kept']}\t{stats['cross']}\t{stats['cdhit']}\t{stats['dropped']}\n"
+            # mqc_dataset(): one row per dataset, no split component.
+            f"{mqc_dataset(id_)}\t{stats['kept']}\t{stats['cross']}\t{stats['cdhit']}\t{stats['dropped']}\n"
         )
 
 

@@ -316,18 +316,65 @@ def load_embeddings(path):
 # MultiQC sample naming
 # ---------------------------------------------------------------------------
 
-# MultiQC sorts rows alphabetically by Sample name, so a plain f"{id}_{split}"
-# would show test_balanced, test_realistic, train, val. This numeric prefix
-# forces train/val/test/test_balanced/test_realistic order per dataset.
-SPLIT_SORT_KEY = {"train": 1, "val": 2, "test": 3, "test_balanced": 4, "test_realistic": 5, "discarded": 6}
+# The intra-dataset split order. MultiQC sorts rows alphabetically by Sample
+# name, so a plain f"{label}_{split}" would show test_balanced,
+# test_realistic, train, val -- the numeric prefix these helpers add is what
+# forces train -> val -> test -> ... instead.
+#
+# A list rather than the {name: key} dict this used to be, so the order is
+# stated once and the keys cannot drift from it. Every name the dict held is
+# still here, including "test" and "discarded".
+SPLIT_ORDER = ["train", "val", "test", "test_balanced", "test_realistic", "discarded"]
+
+# One stderr line per unknown name per script run, not per row.
+_INDEX_WARNED = set()
 
 
-def mqc_sample(id_, split):
-    """Build a MultiQC Sample name for one dataset+split that sorts correctly."""
-    return f"{id_}_{SPLIT_SORT_KEY.get(split, 9)}_{split}"
+def _index(seq, value, what="name"):
+    """Position of `value` in `seq`, or one past the end when it is unknown.
+
+    Unknown names sort after every known one instead of displacing them, which
+    is what makes an unrecognised split label or dataset a cosmetic problem and
+    not a reordered report. An unknown name is reported once to stderr.
+    """
+    if value in seq:
+        return seq.index(value)
+    key = (what, value)
+    if key not in _INDEX_WARNED:
+        _INDEX_WARNED.add(key)
+        print(f"Warning: unknown {what} {value!r} -- it will sort after every known one", file=sys.stderr)
+    return len(seq)
+
+
+def mqc_sample(label, split):
+    """MultiQC Sample name for one (dataset, split), ordered within the dataset.
+
+    The global, run-wide numbering lives in bin/relabel_mqc.py instead: it needs
+    the run's whole dataset order, and threading that into every task would put
+    the run's dataset set into the hash of tasks as expensive as SELECT_EXAMPLES
+    and SAMPLE_NEGATIVES_ILP -- so adding one dataset would re-solve every other.
+    relabel_mqc.py parses the name back out of the collected *_mqc.tsv files and
+    rewrites it as "<NN>_<label>_<split>" just before MultiQC runs.
+    """
+    return f"{label}_{_index(SPLIT_ORDER, split, 'split') + 1}_{split}"
+
+
+def mqc_dataset(label):
+    """MultiQC Sample name for a whole dataset -- one row, no split.
+
+    Used by the classifier-performance tables and the DDI attrition bar, which
+    report one row per dataset. Identity today; it exists so those writers say
+    which of the two Sample vocabularies they are using, which is what
+    relabel_mqc.py keys its dataset-level vs split-level rewrite on.
+    """
+    return label
 
 
 def mqc_category(name):
-    """Same sort-key prefix as mqc_sample, for bar-chart categories that are
-    already scoped to one dataset's own chart (no id_ qualification needed)."""
-    return f"{SPLIT_SORT_KEY.get(name, 9)}_{name}"
+    """Bar-chart category inside one dataset's own chart -- split order only.
+
+    No dataset component: these charts are already scoped to one dataset, so
+    only the intra-dataset order is at stake and a global index would be noise.
+    relabel_mqc.py leaves these alone for exactly that reason.
+    """
+    return f"{_index(SPLIT_ORDER, name, 'split') + 1}_{name}"

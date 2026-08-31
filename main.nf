@@ -11,6 +11,8 @@ include { SAMPLE_NEGATIVES } from './subworkflows/sample_negatives'
 include { TRAIN_BASELINE }   from './subworkflows/train_baseline'
 include { QC }               from './subworkflows/qc'
 
+include { mqcLabel }        from './helpers/mqc_labels'
+
 // samplesheetToList() represents a blank cell as [] (not null), even for
 // numeric fields where 0 is a legitimate override -- so check both.
 def isGiven(v) {
@@ -47,6 +49,57 @@ def parseNegsets(meta, candidate_network) {
         error("Dataset '${meta.id}': negative_sampling_method lists 'ilp_candidates', which draws negatives from the candidate_network pool, but the row supplies no candidate_network.")
     }
     return names
+}
+
+// Warn when a caller's meta.mqc_labels does not cover exactly the row's negative
+// sets. Not fatal: mqcLabel() falls back to "<id><negsuffix>" for the sets the
+// map misses, which is a cosmetically wrong report rather than a wrong result.
+//
+// Lives here rather than in buildDatasetsChannel() for the same reason
+// parseNegsets() does: an embedding pipeline builds meta in Groovy and is the
+// only caller that ever sets mqc_labels at all.
+def checkMqcLabels(meta, negsets) {
+    if (!(meta.mqc_labels instanceof Map)) {
+        return
+    }
+    def given    = meta.mqc_labels.keySet().collect { k -> k.toString() }
+    def expected = negsets.collect { n -> n.toString() }
+    if (given.toSorted() != expected.toSorted()) {
+        log.warn "Dataset '${meta.id}': mqc_labels covers ${given.toSorted().join(', ')} but the row asks for negative sets ${expected.toSorted().join(', ')} -- the sets with no entry fall back to '<id>_<negset>' display labels."
+    }
+}
+
+// Resolve the run's report order once, from every display label it will produce.
+//
+// The numbering is global, so no task can compute it: this is the only place that
+// sees the whole run. params.mqc_order accepts a Groovy list from a config file
+// and a comma-separated string from the command line. Every warning is advisory
+// -- a mis-set order is a cosmetic problem, never a failed run.
+def resolveMqcOrder(labels) {
+    def present   = labels.collect { l -> l.toString() }.unique()
+    def requested = (params.mqc_order instanceof CharSequence)
+        ? params.mqc_order.toString().tokenize(',')*.trim().findAll { r -> r }
+        : (params.mqc_order ?: []).collect { r -> r.toString().trim() }.findAll { r -> r }
+
+    def ordered = []
+    requested.each { r ->
+        if (!(r in present)) {
+            log.warn "mqc_order names '${r}', which is not a display label of this run -- ignoring it. Labels present: ${present.toSorted().join(', ')}"
+        }
+        else if (r in ordered) {
+            log.warn "mqc_order names '${r}' more than once -- keeping the first occurrence."
+        }
+        else {
+            ordered << r
+        }
+    }
+    // Everything the list did not mention, appended alphabetically -- so an
+    // incomplete order is still a total one, and an empty order is alphabetical.
+    def leftover = (present - ordered).toSorted()
+    if (requested && !ordered) {
+        log.warn "mqc_order was given but matched none of this run's display labels, so the report order is alphabetical. Labels present: ${present.toSorted().join(', ')}"
+    }
+    return (ordered + leftover).join(',')
 }
 
 // One row per PPI dataset. Anything left blank in the samplesheet falls
@@ -155,6 +208,11 @@ workflow PPI_SPLITTING {
                   // `id` plus every per-dataset parameter override -- see
                   // buildDatasetsChannel() for the full list, and note that mutating meta
                   // downstream breaks the joins, which key on the whole map.
+                  //
+                  // meta may also carry the optional `mqc_labels` map (negative-set name ->
+                  // MultiQC display label), which only affects the report -- see
+                  // helpers/mqc_labels.nf. buildDatasetsChannel() never sets it, so a
+                  // samplesheet run's meta, and therefore every task hash, is unchanged.
 
     main:
     // --split_only skips CLUSTERING/TRAIN_BASELINE/QC outright, which makes every
@@ -199,6 +257,7 @@ workflow PPI_SPLITTING {
     // whether the network is in play.
     prepared_ch = checked_ch.map { meta, f ->
         def negsets = parseNegsets(meta, f.candidate_network)
+        checkMqcLabels(meta, negsets)
         if (f.candidate_network && !("ilp_candidates" in negsets)) {
             log.warn "${meta.id}: candidate_network supplied but negative_sampling_method does not list 'ilp_candidates' -- ignoring the network everywhere, including SELECT_EXAMPLES"
         }
@@ -210,6 +269,20 @@ workflow PPI_SPLITTING {
     // parent proteins join the same one-split-per-parent accounting as the
     // positives) and SAMPLE_NEGATIVES. [] unless the row asked for ilp_candidates.
     candidate_network_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, cand) }
+
+    // Every MultiQC display label this run will produce -- one per (dataset row,
+    // negative set) -- collected into the single comma-joined order string that
+    // MULTIQC's relabel step numbers the report by. One item, so it pairs 1:1 with
+    // MULTIQC's own collect()ed file list.
+    //
+    // Only MULTIQC reads it. Handing it to the tasks that emit the *_mqc.tsv files
+    // instead would put the run's dataset set into the hash of SELECT_EXAMPLES and
+    // SAMPLE_NEGATIVES_ILP, so adding one dataset would re-solve every other one on
+    // -resume.
+    mqc_order_ch = prepared_ch
+        .flatMap { meta, negsets, cand -> negsets.collect { ns -> mqcLabel(meta, ns) } }
+        .collect()
+        .map { labels -> resolveMqcOrder(labels) }
 
     // DDI mode swaps the whole data-prep front end: Pfam family accessions in
     // place of UniProt ones, domain instances in place of full chains. Both
@@ -266,7 +339,8 @@ workflow PPI_SPLITTING {
             neg.train, neg.val, neg.test_balanced, neg.test_realistic,
             clustered.blast_out, baseline.embeddings, data.go_annotations, data.species,
             split.train_fasta, split.val_fasta, split.test_fasta,
-            split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc
+            split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc,
+            mqc_order_ch
         )
         multiqc_report_ch = qc.multiqc_report
     }

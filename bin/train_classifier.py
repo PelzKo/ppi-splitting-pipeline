@@ -28,7 +28,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import load_embeddings, read_family_pairs, read_labelled_csv
+from utils import load_embeddings, mqc_dataset, read_family_pairs, read_labelled_csv
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -129,7 +129,9 @@ def write_mqc(results, id_):
             # metrics is None for an empty or single-class split -- keep the row so the
             # dataset still appears in the table, with blank cells.
             row = "\t".join("" if metrics is None else f"{metrics[c]:.4f}" for c in cols)
-            fh.write(f"{id_}\t{id_}\t{row}\n")
+            # mqc_dataset(): one row per dataset, no split component -- which is
+            # what tells relabel_mqc.py to number this Sample by dataset alone.
+            fh.write(f"{mqc_dataset(id_)}\t{id_}\t{row}\n")
 
 
 def write_family_mqc(results, id_):
@@ -170,7 +172,7 @@ def write_family_mqc(results, id_):
                 "Sample\tID\tDDIs\tAUROC\tAUPRC\tF1\tMCC\tPrecision\tRecall\tAccuracy\n"
             )
             row = "\t".join("" if metrics is None else f"{metrics[c]:.4f}" for c in cols)
-            fh.write(f"{id_}\t{id_}\t{n_ddis}\t{row}\n")
+            fh.write(f"{mqc_dataset(id_)}\t{id_}\t{n_ddis}\t{row}\n")
 
 
 def main():

@@ -1,22 +1,18 @@
 include { BIAS_ANALYSIS; COLLECT_BIAS; DDI_ATTRITION; SIMILARITY_HEATMAP; MULTIQC } from '../processes/qc'
+include { mqcLabel; mqcRowLabel } from '../helpers/mqc_labels'
 
 // Some mqc-emitting processes glob-match more than one file per task, which
 // Nextflow packs into a List -- flatten to one (id, file) pair per file so
 // groupTuple() below doesn't nest a List inside the grouped list.
+//
+// Keyed by the row's MultiQC display label rather than meta.id: for everything
+// that reaches MULTIQC the key is only a grouping handle, but DDI_ATTRITION also
+// passes it on as its --id, and that label is what params.mqc_order names.
 def flattenMqc(ch) {
     ch.flatMap { meta, f ->
         def files = (f instanceof List) ? f : [f]
-        files.collect { ff -> tuple(meta.id, ff) }
+        files.collect { ff -> tuple(mqcRowLabel(meta), ff) }
     }
-}
-
-// Same rule as subworkflows/sample_negatives.nf's negsuffix(), re-derived from
-// meta because the channels here carry one negative set at a time rather than the
-// row's whole list: "" for a single-negative-set row, so its MultiQC section names
-// are unchanged, "_<negset>" otherwise so the sets get one bias scatter each.
-// Keep the two in step.
-def negsuffix(meta, negset) {
-    meta.negative_sampling_method.toString().tokenize(',').size() > 1 ? "_${negset}" : ""
 }
 
 // Runs the per-attribute bias analyses, collects them into a scatter plot,
@@ -39,6 +35,7 @@ workflow QC {
     nr_mqc
     neg_mqc
     clf_mqc
+    mqc_order             // comma-joined display labels, in report order (resolved in main.nf)
 
     main:
     // Whether to include "same_species" depends on each dataset's own
@@ -92,15 +89,32 @@ workflow QC {
     // keeps a row's two sets from being averaged into a single plot.
     bias_by_negset = bias.mqc.flatMap { meta, negset, f ->
         def files = (f instanceof List) ? f : [f]
-        files.collect { ff -> tuple("${meta.id}${negsuffix(meta, negset)}", ff) }
+        files.collect { ff -> tuple(mqcLabel(meta, negset), ff) }
     }
     scatter = COLLECT_BIAS(bias_by_negset.groupTuple())
 
+    // meta.id AND the display label: the first is SIMILARITY_HEATMAP's publishDir
+    // component, the second only names the report section. They differ for a row
+    // with several negative sets, so passing one for both would move a published
+    // directory.
     heatmap_inputs = train_fasta.join(val_fasta).join(test_fasta).join(blast_out)
-        .map { meta, t, v, te, b -> tuple(meta.id, t, v, te, b) }
+        .map { meta, t, v, te, b -> tuple(meta.id, mqcRowLabel(meta), t, v, te, b) }
     heatmap = SIMILARITY_HEATMAP(heatmap_inputs)
 
     splitting_mqc = flattenMqc(sorted_mqc).mix(flattenMqc(nr_mqc))
+
+    // sort_ppis.py's write_mqc() is only ever reached through sort_ppis_random.py,
+    // and the random path skips REMOVE_REDUNDANT entirely -- so the two writers of
+    // the shared "split_bar_<label>" section id are on mutually exclusive paths and
+    // this never fires today. It is here because if that ever changes MultiQC
+    // silently merges the two files into one chart, keeping whichever it parses
+    // last, and nothing else in the run would say so.
+    splitting_mqc.groupTuple().subscribe { id, files ->
+        def names = files.collect { ff -> ff.name }
+        if (names.any { n -> n.startsWith('sort_ppis_bar') } && names.any { n -> n.startsWith('remove_redundant_bar') }) {
+            log.warn "${id}: both sort_ppis_bar_mqc.tsv and remove_redundant_bar_mqc.tsv were produced. They declare the same MultiQC section id (split_bar_<label>), so MultiQC will merge them into one chart and keep whichever file it parses last."
+        }
+    }
 
     // One stacked bar per dataset -- not per negative set: every bar it reads back
     // is a splitting-stage bar, and the splitting stage runs once per row whatever
@@ -124,7 +138,7 @@ workflow QC {
         .map { id, f -> f }
         .collect()
 
-    multiqc = MULTIQC(mqc_files)
+    multiqc = MULTIQC(mqc_files, mqc_order)
 
     emit:
     // Emitted rather than only published, so a pipeline including PPI_SPLITTING can

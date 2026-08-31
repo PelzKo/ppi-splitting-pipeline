@@ -1,3 +1,5 @@
+include { mqcLabel } from '../helpers/mqc_labels'
+
 // Datasets requesting the same embedding_model share one embedding call over
 // the union of their train/val/test sequences, avoiding recomputation for
 // proteins in more than one dataset. stageAs auto-numbers fasta_files since
@@ -24,17 +26,8 @@ process EMBED_SEQUENCES {
     """
 }
 
-// Same rule as subworkflows/sample_negatives.nf's negsuffix(), re-derived from
-// meta because this process sees one negative set at a time rather than the row's
-// whole list: "" for a single-negative-set row, so its MultiQC sample names are
-// unchanged, "_<negset>" otherwise so the sets do not collide in one report.
-// Keep the two in step.
-def negsuffix(meta, negset) {
-    meta.negative_sampling_method.toString().tokenize(',').size() > 1 ? "_${negset}" : ""
-}
-
 process TRAIN_CLASSIFIER {
-    tag "${meta.id}${negsuffix(meta, negset)}"
+    tag "${mqcLabel(meta, negset)}"
     label 'error_retry'
 
     input:
@@ -46,7 +39,9 @@ process TRAIN_CLASSIFIER {
     script:
     // test_realistic is one shared file across a row's negative sets, so its
     // metrics row repeats -- truthfully -- once per set.
-    def mqc_id = "${meta.id}${negsuffix(meta, negset)}"
+    // The MultiQC display label -- "${meta.id}${negsuffix}" unless the caller
+    // supplied meta.mqc_labels. See helpers/mqc_labels.nf.
+    def mqc_id = mqcLabel(meta, negset)
     """
     train_classifier.py \\
         --train          ${train_csv} \\
