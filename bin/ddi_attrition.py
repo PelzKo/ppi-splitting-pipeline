@@ -4,7 +4,7 @@ DDI mode: one attrition waterfall per dataset, from the splitting stage's own ba
 
 Scope: "input" here means the DDIs this pipeline received in its `ppis` input,
 not the caller's full DDI universe. A caller that filtered DDIs out before
-handing them over -- by `instance_tier`, say, which drops every DDI touching a
+handing them over -- by `instance_tiers`, say, which drops every DDI touching a
 family with no eligible domain instance -- must account for those itself; they
 are outside this chart entirely, and the four series below sum to what arrived.
 
@@ -153,7 +153,7 @@ def write_mqc(stats, id_):
             "reached zero domain-instance examples, because another split already had its "
             "parent proteins or the family had no usable instance. The four series sum to the "
             "DDIs this pipeline received in its ppis input -- DDIs the caller filtered out "
-            "before handing them over, for example by instance_tier, are outside this chart "
+            "before handing them over, for example by instance_tiers, are outside this chart "
             "and must be accounted for by the caller.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"

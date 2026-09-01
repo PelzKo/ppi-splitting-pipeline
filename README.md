@@ -88,7 +88,7 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 
 **FETCH_DATA** — Queries UniProt for the union of unique proteins across every samplesheet dataset that needs a fetch (extracted directly from each dataset's `protein1`/`protein2` columns and deduplicated, no PPI CSVs concatenated). Retrieves sequences (canonical + isoform-specific via the FASTA endpoint), GO annotations (biological process, molecular function, cellular component), and NCBI taxon IDs. Outputs `sequences.fasta`, `go_annotations.tsv`, and `species.tsv`, published to `results/_shared/data/`, then split back out per dataset (`SUBSET_FETCHED_DATA`) — see [Multiple datasets (samplesheet)](#multiple-datasets-samplesheet) below.
 
-**FETCH_DOMAIN_META** — DDI mode only, replacing `FETCH_DATA`. Pools the Pfam family accessions across every dataset that needs a fetch and resolves them in one streaming pass over Pfam's bulk files, with no per-family API requests: `Pfam-A.fasta.gz` for the domain instances (already cut, so sequence and coordinates come from one release), `Pfam-A.clans.tsv.gz` for family → clan, and `speclist.txt` plus UniProt's reviewed-accession list for the sampling tiers. Samples up to `M` instances per family — restricted to human instances by `--instance_tier human_only` — and writes `sequences.fasta` keyed by instance, `species.tsv`, a header-only `go_annotations.tsv`, `instances.tsv` and `dropped_families.tsv` (every requested family that kept no instance, with the reason) — published to `results/_shared/data/`, then split back out per dataset (`SUBSET_DOMAIN_DATA`).
+**FETCH_DOMAIN_META** — DDI mode only, replacing `FETCH_DATA`. Pools the Pfam family accessions across every dataset that needs a fetch and resolves them in one streaming pass over Pfam's bulk files, with no per-family API requests: `Pfam-A.regions.tsv.gz` for every region's family, parent accession and alignment coordinates, `Pfam-A.clans.tsv.gz` for family → clan, and one or more UniProt flat files for the parent sequence, taxon and review flag the regions table lacks. Samples up to `M` instances per family out of the strata `--instance_tiers` names — and writes `sequences.fasta` keyed by instance, `species.tsv`, a header-only `go_annotations.tsv`, `instances.tsv` and `dropped_families.tsv` (every requested family that kept no instance, with the reason) — published to `results/_shared/data/`, then split back out per dataset (`SUBSET_DOMAIN_DATA`).
 
 **GET_LENGTHS** — Computes per-protein sequence lengths for length-normalized BLAST scores. Runs once on the shared fetch batch (see above) for datasets needing a fetch, and once per dataset for datasets supplying a precomputed `sequences.fasta`.
 
@@ -162,7 +162,7 @@ family degree in the DDI graph rather than protein degree.
 
 **SIMILARITY_HEATMAP** — Plots a heatmap of pairwise BLASTp similarity between proteins in different splits, to visualize the degree of leakage.
 
-**DDI_ATTRITION** — DDI mode only. One stacked bar per dataset accounting for every DDI that reached the splitting stage: discarded cross-cluster by the partitioner, removed by CD-HIT-2D, dropped because no domain-instance example was left for it, or kept. The counts are read back out of the DDI Partitioning and DDI Example Selection bars rather than re-derived, so the waterfall and the per-stage charts cannot disagree. The section is titled **DDI Attrition (within splitting)** because that is its scope: the four series sum to the DDIs handed to this pipeline in its `ppis` input, so DDIs a caller filtered out beforehand — by `--instance_tier human_only`, say — are outside the chart and remain the caller's to account for.
+**DDI_ATTRITION** — DDI mode only. One stacked bar per dataset accounting for every DDI that reached the splitting stage: discarded cross-cluster by the partitioner, removed by CD-HIT-2D, dropped because no domain-instance example was left for it, or kept. The counts are read back out of the DDI Partitioning and DDI Example Selection bars rather than re-derived, so the waterfall and the per-stage charts cannot disagree. The section is titled **DDI Attrition (within splitting)** because that is its scope: the four series sum to the DDIs handed to this pipeline in its `ppis` input, so DDIs a caller filtered out beforehand — by a narrow `--instance_tiers`, say — are outside the chart and remain the caller's to account for.
 
 **MULTIQC** — Collects every dataset's `*_mqc.tsv`/`*_mqc.html` files into one combined report for the whole run (`results/multiqc/`). Per-attribute bias tables are excluded (the bias-scatter plot supersedes them); General Statistics, Classifier Performance, Positive vs Negative Pairs, and (in DDI mode) DDI Instance Expansion and DDI Attrition are merged across datasets (qualified sample names + an `ID` column); PPI/DDI Partitioning, DDI Example Selection, the similarity heatmap, and the bias-scatter plot remain one separate panel per dataset.
 
@@ -365,10 +365,11 @@ co-occurrence — any instance of family A × any instance of family B, no PPI
 network involved. Two counts govern that:
 
 - **`M`** = `ddi_examples_pool_factor` × `N` instances sampled per family, in tier
-  order (human-reviewed → human → reviewed → any, at random within a tier). This
-  is all that BLAST, CD-HIT and the classifier ever see of a family. An empty tier
-  is ordinary, not an error. `--instance_tier human_only` makes the last two tiers
-  *ineligible* rather than merely least preferred (below).
+  order (human_reviewed → other_reviewed → human_unreviewed → other_unreviewed, at
+  random within a tier). This is all that BLAST, CD-HIT and the classifier ever see
+  of a family. An empty tier is ordinary, not an error. `--instance_tiers` names
+  which of the four may be sampled *at all*, rather than which are preferred
+  (below).
 - **`N`** = `ddi_examples_target` examples kept per DDI — a cap, not a quota. A
   DDI with fewer available keeps what it has; only one left with *zero* is
   dropped, and reported.
@@ -388,43 +389,74 @@ saving grace is that the per-DDI candidate pool stays capped at
 reserve of never-claimed proteins is also inert at factor 1 and live above it, so
 factor ≥ 2 exercises code that factor 1 cannot reach.
 
-### Restricting instances to human: `--instance_tier human_only`
+### Choosing the strata: `--instance_tiers`
 
-By default (`any`) the four strata are a *preference* order: a family with no
-human instance simply falls through to reviewed and then to anything. With
-`--instance_tier human_only` the two non-human strata become **ineligible**, and
-the consequence is the point of the option rather than a side effect:
+The four strata are disjoint and named, and `--instance_tiers` (a comma-separated
+list, default `human_reviewed`) says which of them may be sampled **at all**, not
+which are preferred. Whatever order they are named in, they fill in this one:
 
-- A family whose Pfam instances are all non-human keeps **zero** instances. Every
-  DDI touching it then has no instance pair to represent it and drops out of the
-  run. This is never an error and never aborts.
-- Every family that *does* keep instances keeps exactly the instances it would
-  have kept under `any` — the cascade fills top-down with the same room and each
-  reservoir carries its own seed, so gating the lower strata cannot perturb the
-  upper ones. `human_only`'s `instances.tsv` is the human subset of `any`'s, row
-  for row.
-- Both tiers get their own cache entry: the tier is part of
-  `--interpro_cache`'s key, so a warm `any` cache cannot serve a `human_only` run.
+| stratum | contents |
+|---|---|
+| `human_reviewed` | human Swiss-Prot |
+| `other_reviewed` | non-human Swiss-Prot |
+| `human_unreviewed` | human TrEMBL |
+| `other_unreviewed` | non-human TrEMBL |
+
+**Reviewed outranks human.** A family with no human Swiss-Prot member takes a
+curated non-human sequence before it takes an auto-annotated human one — a
+deliberate quality-over-species-match judgment, and the reason the middle two sit
+in this order rather than the reverse.
+
+The consequences of a narrow set are the point of the option rather than a side
+effect:
+
+- A family with nothing in a named stratum keeps **zero** instances. Every DDI
+  touching it then has no instance pair to represent it and drops out of the run.
+  This is never an error and never aborts.
+- Every family that *does* keep instances keeps exactly the instances a wider set
+  would have given it out of those same strata — the cascade fills top-down with
+  the same room and each reservoir carries its own seed, so leaving the lower
+  strata out cannot perturb the upper ones. `human_reviewed`'s `instances.tsv` is
+  the human-reviewed subset of the full set's, row for row.
+- The cascade fills **freely**, not as a top-up: a family with 3 `human_reviewed`
+  regions and `M = 25` keeps those 3 and takes the other 22 out of
+  `other_reviewed`. It does not stop because the top stratum was non-empty.
+- Every tier set gets its own cache entry: the sorted list is part of
+  `--interpro_cache`'s key, so a warm cache written under one set cannot serve
+  another.
+
+The two unreviewed strata can only be filled from a TrEMBL flat file, so
+`--uniprot_dat` takes a list (Swiss-Prot first — the first file carrying an
+accession wins, which is what makes a TrEMBL-to-Swiss-Prot promotion resolve to
+the curated record). A tier set the parsed universe can never fill is a hard error
+*before* the 4.7 GB regions pass rather than a quietly smaller run, because those
+two outcomes are otherwise indistinguishable:
+
+```
+--tiers includes human_unreviewed, but none of the 20,412 proteins parsed from
+uniprot_sprot_human.dat.gz are unreviewed. Pass the matching TrEMBL flat file
+(--uniprot-dat uniprot_trembl_*.dat.gz).
+```
 
 `FETCH_DOMAIN_META` always writes **`_shared/data/dropped_families.tsv`**
 (`family`, `reason`), one row per requested family that kept no instance:
 
 | `reason` | meaning |
 |---|---|
-| `no_eligible_instances` | Pfam has the family, but nothing in a tier `--instance_tier` allows. Under `human_only` this is the expected bulk; under `any` it should be empty |
+| `no_eligible_instances` | Pfam has the family, but nothing in a stratum `--instance_tiers` names. Under a narrow set this is the expected bulk; with all four named it should be empty |
 | `dead` | the accession is listed in `Pfam-A.dead` |
-| `not_in_pfam` | no instances in `Pfam-A.fasta` and not listed as dead — usually a typo in the input |
+| `not_in_pfam` | no regions in `Pfam-A.regions` and not listed as dead — usually a typo in the input |
 
 The three are counted and warned separately on `FETCH_DOMAIN_META`'s stderr, so a
-large `human_only` drop cannot hide among dead accessions. Note this compounds
-with `ddi_examples_pool_factor`: asking for `M = 25` instances from human strata
-alone will underfill most families, and fewer instances per family is *good* for
+large `--instance_tiers` drop cannot hide among dead accessions. Note this
+compounds with `ddi_examples_pool_factor`: asking for `M = 25` instances from one
+stratum will underfill most families, and fewer instances per family is *good* for
 val/test survival (see the factor's effect above) but leaves smaller pools for
 `SELECT_EXAMPLES`.
 
 `species.tsv` and the `same_species` bias attribute are deliberately untouched —
-under `human_only` that attribute goes constant and its NMI to ~0, which is the
-intended sanity signal rather than something to suppress.
+under a human-only tier set that attribute goes constant and its NMI to ~0, which
+is the intended sanity signal rather than something to suppress.
 
 ### Parameters
 
@@ -439,9 +471,9 @@ intended sanity signal rather than something to suppress.
 | `ddi_shortlist_factor`     | `4`     | Cap on a DDI's candidate pool before the ILP, as a multiple of `N`. A no-op at `M = N`, a guard for a larger pool                               |
 | `ddi_candidate_factor`     | `4`     | Cap on `candidate_network` pairs per split, as a multiple of that split's DDI count                                                             |
 | `ddi_select_verbose`       | `false` | Let the `SELECT_EXAMPLES` solver print its own log to `.command.err`. Off by default: one block per ILP solve, which is large at real DDI counts |
-| `instance_tier`            | `any`   | `any` fills the four strata in preference order; `human_only` makes the two non-human strata ineligible, so a family with no human instance keeps zero instances and its DDIs drop out. Reported in `_shared/data/dropped_families.tsv`. The protein universe is Swiss-Prot, so the two *unreviewed* strata never fill and `human_only` is effectively the human-reviewed stratum; the ladder stays so that adding a TrEMBL source is a data change rather than a redesign. `human_only` also narrows the universe as it is parsed, which is why it is much the cheaper of the two |
+| `instance_tiers`           | `human_reviewed` | Comma-separated strata to sample, out of `human_reviewed`, `other_reviewed`, `human_unreviewed`, `other_unreviewed`. They fill in that order (reviewed outranks human) whatever order they are named in; a stratum left out is never offered a record, so a family with nothing in a named one keeps zero instances and its DDIs drop out, reported in `_shared/data/dropped_families.tsv`. The unreviewed two need a TrEMBL `uniprot_dat` and are a hard error without one. A human-only set also narrows the universe as it is parsed, which is why it is by far the cheapest |
 | `pfam_regions`             | `null`  | Local `Pfam-A.regions.tsv.gz`, skipping the ~4.7 GB download                                                                                    |
-| `uniprot_dat`              | `null`  | Local `uniprot_sprot.dat.gz` — the protein universe: parent sequence, taxon, and (being Swiss-Prot) the reviewed set. Downloaded (~600 MB) into `interpro_cache` when unset; DDI mode requires one or the other |
+| `uniprot_dat`              | `null`  | UniProt flat file(s) — the protein universe: parent sequence, taxon and per-entry review flag. A list, or a comma-separated string, with Swiss-Prot first: the first file carrying an accession wins, so a TrEMBL entry promoted between releases resolves to its curated record. Swiss-Prot alone is downloaded (~600 MB) into `interpro_cache` when unset, which can only fill the reviewed strata; DDI mode requires one or the other |
 | `pfam_clans`               | `null`  | Local `Pfam-A.clans.tsv(.gz)`, skipping that download                                                                                           |
 | `pfam_release`             | `null`  | Pin the release string (e.g. `38.2`) instead of downloading `Pfam.version`. That lookup happens before the cache directory is known, so it is the one fetch a warm cache cannot skip |
 | `interpro_cache`           | `null`  | Directory for the cached downloads and sampled instances. **Must be an absolute path on a filesystem all compute nodes share** — it is resolved to one, but node-local scratch gives every task its own cold cache. A convenience only: a cold run produces identical output. `-profile test_ddi` sets it to `<projectDir>/.pfam_cache` |
@@ -900,12 +932,23 @@ tag and the submodule tag have to move together**: a `bin/` change with a stale
 image is a silently wrong run, not a failure. `-profile conda` is supported for
 standalone runs only, for exactly that `$projectDir/bin` reason.
 
+For a **`--split_only`** run there is a second, much smaller image,
+`docker/Dockerfile.split_only`: the ILP core only (cvxpy, its solvers, cd-hit), with
+no blast/kahip/multiqc/torch and no baked-in `bin/`. It is therefore standalone-only,
+like `-profile conda`, but its tag is not tied to a git tag. No profile names it —
+pass it explicitly:
+
+```bash
+nextflow run main.nf --samplesheet s.csv --split_only \
+    -with-docker docker.io/konstantinpelz/ppi-splitting-split-only:<tag>
+```
+
 ---
 
 ## Requirements
 
 - [Nextflow](https://www.nextflow.io/) ≥ 23.10
-- Conda (for the environment) — or install the packages in `environment.yml` manually, or use `-profile docker` and the image built from `Dockerfile`
+- Conda (for the environment) — or install the packages in `environment.yml` manually, or use `-profile docker` and the image built from `docker/Dockerfile`
 - Internet access for the initial UniProt fetch (subsequent runs use cached Nextflow work directories)
-- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. The wheel's CUDA major version must not exceed the driver's (minors are compatible). `Dockerfile` pins `torch==2.10.0+cu128` for that reason; **`environment.yml` does not pin torch at all**, so a conda env built from it takes whatever pip resolves that day and can reproduce the silent-CPU failure `-profile gpu` exists to catch
-- For DDI mode, internet access for the Pfam pass — one ~4.7 GB transfer plus a ~600 MB Swiss-Prot flat file per run, or none if `--pfam_regions`/`--pfam_clans`/`--uniprot_dat` point at local copies. `--interpro_cache <abs-dir>` makes repeat runs a stat and a read (plus one small `Pfam.version` request, which `--pfam_release` removes)
+- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. The wheel's CUDA major version must not exceed the driver's (minors are compatible). `environment.yml` pins `torch==2.10.0+cu128` for that reason, and `docker/Dockerfile` installs from that same file, so `-profile conda` and `-profile docker` cannot disagree about the wheel
+- For DDI mode, internet access for the Pfam pass — one ~4.7 GB transfer plus a ~600 MB Swiss-Prot flat file per run, or none if `--pfam_regions`/`--pfam_clans`/`--uniprot_dat` point at local copies (a TrEMBL file has to be local: it is never downloaded). `--interpro_cache <abs-dir>` makes repeat runs a stat and a read (plus one small `Pfam.version` request, which `--pfam_release` removes)

@@ -14,15 +14,16 @@ full 30,134-family set would be ~242 sequential hours against a public service.
 
     Pfam-A.regions.tsv.gz every Pfam region of every reference-proteome protein:
                           family, parent accession and the alignment coordinates
-    uniprot_sprot.dat.gz  the Swiss-Prot flat file: parent sequence (SQ) and
-                          taxon (OX) per accession, and -- being Swiss-Prot --
-                          the reviewed accession set itself
+    uniprot_sprot.dat.gz  a UniProt flat file: parent sequence (SQ), taxon (OX)
+                          and the review flag (ID) per accession. Repeatable --
+                          list Swiss-Prot first and a TrEMBL file after it, which
+                          is what makes the unreviewed strata fillable at all
     Pfam-A.clans.tsv.gz   family -> clan; a blank clan column means singleton
 
 **Why regions and not Pfam-A.fasta.** Pfam-A.fasta is "90 % non-redundant" (Pfam's
 own release notes). For a well-conserved family the human member is >=90 %
 identical to some other organism's and is dropped, so the family keeps plenty of
-records with no _HUMAN among them and --tier human_only correctly reports
+records with no _HUMAN among them and a human-only --tiers correctly reports
 `no_eligible_instances` for it. Measured over a 12,769-family human request:
 10,566 families dropped that way, leaving 2,140. Pfam-A.regions.tsv.gz is the same
 reference-proteome basis with no redundancy reduction, so every human region is
@@ -77,9 +78,12 @@ SPROT_URL = (
 # Bumped whenever the sampling or output format changes, so a cache written by
 # an older version of this script is ignored rather than silently reused. 2:
 # instances now come from Pfam-A.regions.tsv.gz rather than the 90 %-non-redundant
-# Pfam-A.fasta, so a v1 cache holds a *different* -- and for --tier human_only a
-# much smaller -- instance set for the same key inputs.
-FORMAT_VERSION = 2
+# Pfam-A.fasta, so a v1 cache holds a *different* -- and for a human-only tier set a
+# much smaller -- instance set for the same key inputs. 3: TIERS was reordered and
+# renamed, which redraws every family's sample at the same --seed (the tier name
+# namespaces each reservoir's RNG, see Reservoir), and source_db became the real
+# per-instance review flag rather than the constant "reviewed" it used to be.
+FORMAT_VERSION = 3
 
 # The columns Pfam-A.regions.tsv.gz is read by name, not by position: the file has
 # gained columns before (ali_start/ali_end are newer than seq_start/seq_end) and a
@@ -104,26 +108,37 @@ PARENT_CAP_DIVISOR = 5
 # OX   NCBI_TaxID=9606;
 DAT_TAXON_RE = re.compile(r"NCBI_TaxID=(\d+)")
 
+# ID   TP53_HUMAN              Reviewed;         393 AA.
+# ID   A0A804HJH4_HUMAN        Unreviewed;       557 AA.
+DAT_REVIEW_TOKENS = {"Reviewed;": True, "Unreviewed;": False}
+
 DEAD_AC_RE = re.compile(r"^#=GF\s+AC\s+(PF\d+)")
 
-# Disjoint strata, in fill order: human-reviewed -> human -> reviewed -> any.
-# Disjoint rather than nested so an instance lands in exactly one reservoir and
-# the cascade needs no deduplication at the family boundary.
-TIERS = ("human_reviewed", "human", "reviewed", "any")
+# Disjoint strata, in fill order. **Reviewed outranks human**: a family with no
+# human Swiss-Prot member takes a curated non-human sequence before it takes an
+# auto-annotated human one. That is a deliberate quality-over-species-match
+# judgment and it is why 1 and 2 sit in this order rather than the reverse -- the
+# ordering before FORMAT_VERSION 3 had human first, and someone will assume it
+# still does. Disjoint rather than nested so an instance lands in exactly one
+# reservoir and the cascade needs no deduplication at the family boundary.
+TIERS = ("human_reviewed", "other_reviewed", "human_unreviewed", "other_unreviewed")
 N_TIERS = len(TIERS)
 
-# --tier restricts which strata may be filled at all, as opposed to which are
-# preferred. Under "human_only" the two non-human strata are never offered a
-# record, so a family whose instances are all non-human ends with *zero*
-# instances rather than falling back to them -- which is the point: domainsplit
-# ingests these instances into a human-only database and aborts on any other
-# taxon. Because the cascade fills top-down with the same room and every
-# reservoir carries its own seed, the human instances a family keeps under
-# "human_only" are identical to the ones it keeps under "any".
-TIER_ELIGIBILITY = {
-    "any": frozenset(range(N_TIERS)),
-    "human_only": frozenset({0, 1}),
-}
+# The strata that can hold nothing but Homo sapiens, and the two that partition
+# the universe the other way. eligible_taxa() narrows the parse with HUMAN_TIERS,
+# so getting it wrong parses the whole of Swiss-Prot for a human-only run -- a
+# silent 6x cost rather than a failure. The other two drive the step-9 guard.
+HUMAN_TIERS = frozenset({0, 2})
+UNREVIEWED_TIERS = frozenset({2, 3})
+NONHUMAN_TIERS = frozenset({1, 3})
+
+# --tiers names the strata that may be filled at all, as opposed to which are
+# preferred: a stratum not named is never offered a record, so a family with
+# nothing in a named one ends with *zero* instances rather than falling back.
+# There is no named preset and no forbidden combination -- the caller says which
+# strata it wants and this script has no opinion about which of them are
+# meaningful together (domainsplit's human-only ingest is domainsplit's rule).
+DEFAULT_TIERS = ("human_reviewed",)
 
 # One row per requested family that reaches zero instances, with the reason.
 # Published rather than made a MultiQC section: the fetch runs once per *run*
@@ -131,7 +146,7 @@ TIER_ELIGIBILITY = {
 # section, and QC does not run at all under --split_only.
 DROPPED_FAMILIES_COLUMNS = ("family", "reason")
 DROP_REASONS = {
-    "no_eligible_instances": "have Pfam records but none in a tier --tier allows",
+    "no_eligible_instances": "have Pfam records but none in a stratum --tiers names",
     "dead": "are dead in Pfam",
     "not_in_pfam": "have no regions in Pfam-A.regions and are not listed as dead",
 }
@@ -219,41 +234,68 @@ def parse_clans(text):
     return clans
 
 
-def parse_uniprot_dat(stream, taxa=None):
-    """Return {accession: (taxon_id, sequence)} from a Swiss-Prot flat-file stream.
+def parse_uniprot_dat(stream, taxa=None, into=None):
+    """Fill {accession: (taxon_id, sequence, reviewed)} from a UniProt flat-file stream.
 
     This is the whole protein universe: Pfam-A.regions gives coordinates and
-    nothing else, so sequence *and* taxon come from here, and membership in this
-    mapping is what "reviewed" means -- Swiss-Prot is the reviewed set, which is
-    why no separate reviewed-accession download is needed any more.
+    nothing else, so sequence, taxon *and* the review flag all come from here.
+    The flag is read per entry off the ID line rather than inferred from which
+    file the accession came out of, so one parser handles Swiss-Prot and TrEMBL
+    and no caller has to reason about which is which:
+
+        ID   TP53_HUMAN              Reviewed;         393 AA.
+        ID   A0A804HJH4_HUMAN        Unreviewed;       557 AA.
+
+    An ID line carrying neither token is fatal rather than False: a silently
+    mis-parsed flag would file every TrEMBL protein in the human_reviewed
+    stratum, and there would be no symptom at all until someone read source_db.
 
     `taxa` optionally restricts the universe to those NCBI taxon ids while
-    parsing. Under --tier human_only the eligible strata are human-only, so the
-    caller passes {"9606"} and the universe is ~20k entries instead of ~575k --
-    the difference between ~10 MB and several hundred MB held for the whole
+    parsing. A --tiers naming only human strata passes {"9606"} (see
+    eligible_taxa), and the universe is ~20k entries instead of ~573k -- the
+    difference between ~10 MB and several hundred MB held for the whole
     streaming pass.
+
+    `into` merges into an existing mapping and the **first** writer wins on a
+    duplicate accession, which is what lets load_universe() layer several files
+    (Swiss-Prot first) without the outcome depending on dict-update order.
 
     Every accession of an entry is indexed, not only the primary one: Pfam's
     pfamseq_acc follows UniProt's primary accession, but an accession demoted to
     secondary between the two releases would otherwise silently lose all of its
     regions.
     """
-    universe = {}
-    accessions, taxon, seq_parts, in_seq = [], "", [], False
+    universe = {} if into is None else into
+    accessions, taxon, seq_parts, in_seq, reviewed = [], "", [], False, None
 
     def flush():
-        if accessions and taxon and (taxa is None or taxon in taxa):
+        if not accessions:
+            return
+        if reviewed is None:
+            raise RuntimeError(
+                f"UniProt entry {accessions[0]} has no ID line, so its review status is "
+                "unknown -- refusing to guess it"
+            )
+        if taxon and (taxa is None or taxon in taxa):
             sequence = "".join(seq_parts)
             for acc in accessions:
-                universe[acc] = (taxon, sequence)
+                universe.setdefault(acc, (taxon, sequence, reviewed))
 
     for raw in stream:
         line = raw.decode("ascii", "replace") if isinstance(raw, bytes) else raw
         if line.startswith("//"):
             flush()
-            accessions, taxon, seq_parts, in_seq = [], "", [], False
+            accessions, taxon, seq_parts, in_seq, reviewed = [], "", [], False, None
         elif in_seq:
             seq_parts.append(line.strip().replace(" ", ""))
+        elif line.startswith("ID   "):
+            fields = line.split()
+            token = fields[2] if len(fields) > 2 else ""
+            if token not in DAT_REVIEW_TOKENS:
+                raise RuntimeError(
+                    f"UniProt ID line carries neither Reviewed; nor Unreviewed;: {line.rstrip()!r}"
+                )
+            reviewed = DAT_REVIEW_TOKENS[token]
         elif line.startswith("AC   "):
             accessions.extend(a.strip() for a in line[5:].split(";") if a.strip())
         elif line.startswith("OX   "):
@@ -265,14 +307,94 @@ def parse_uniprot_dat(stream, taxa=None):
     return universe
 
 
-def eligible_taxa(eligible):
-    """The taxon filter implied by a set of eligible tier indices, or None for no filter.
+def load_universe(paths, taxa=None):
+    """Parse every --uniprot-dat into one universe; the first file to carry an accession wins.
 
-    Tiers 0 and 1 are the human strata (see TIERS), so a run whose eligible set
-    holds only those cannot use a non-human protein at all and the universe can be
-    narrowed while it is being parsed. Any other eligible set admits every taxon.
+    Swiss-Prot must therefore be listed first: an accession promoted from TrEMBL
+    between releases exists in both files, the curated record is the right one,
+    and which one lands must not come down to dict-update order by accident.
+
+    A file that contributes nothing after the taxon filter is fatal rather than
+    logged. It is the wrong file or the wrong filter, and either one looks exactly
+    like a successful run with fewer families several steps downstream.
     """
-    return {HUMAN_TAXON} if set(eligible) <= {0, 1} else None
+    universe = {}
+    for path in paths:
+        before = len(universe)
+        with open(path, "rb") as fh:
+            parse_uniprot_dat(iter_gzip_lines(fh), taxa, universe)
+        added = len(universe) - before
+        print(f"  {path}: {added:,} accessions", file=sys.stderr)
+        if not added:
+            raise RuntimeError(
+                f"{path} contributed no proteins to the universe"
+                + (f" for taxon(s) {', '.join(sorted(taxa))}" if taxa else "")
+                + (
+                    " -- already covered by an earlier --uniprot-dat?"
+                    if before
+                    else " -- every region would be dropped as not_in_universe"
+                )
+            )
+    return universe
+
+
+def eligible_taxa(eligible):
+    """{'9606'} when no eligible stratum can hold a non-human protein, else None.
+
+    A run whose eligible set holds only human strata cannot use a non-human
+    protein at all, so the universe is narrowed while it is being parsed. Any
+    other eligible set admits every taxon. Note HUMAN_TIERS is {0, 2} under the
+    reviewed-outranks-human ordering, not the {0, 1} it was before.
+    """
+    return {HUMAN_TAXON} if set(eligible) <= HUMAN_TIERS else None
+
+
+def check_universe_covers(eligible, universe, sources):
+    """Fail before the regions pass when an eligible stratum can never be filled.
+
+    This is the failure mode with no symptom: a stratum the parsed universe cannot
+    serve looks exactly like a successful run with fewer families -- the families
+    it would have carried simply reach zero instances and their DDIs drop out.
+    """
+    where = ", ".join(str(p) for p in sources)
+    for tiers, holds, hint in (
+        (
+            UNREVIEWED_TIERS,
+            any(not rec[2] for rec in universe.values()),
+            "Pass the matching TrEMBL flat file (--uniprot-dat uniprot_trembl_*.dat.gz).",
+        ),
+        (
+            NONHUMAN_TIERS,
+            any(rec[0] != HUMAN_TAXON for rec in universe.values()),
+            "Pass a flat file that is not restricted to Homo sapiens.",
+        ),
+    ):
+        wanted = sorted(set(eligible) & tiers)
+        if not wanted or holds:
+            continue
+        adjective = "unreviewed" if tiers is UNREVIEWED_TIERS else "non-human"
+        raise RuntimeError(
+            f"--tiers includes {', '.join(TIERS[t] for t in wanted)}, but none of the "
+            f"{len(universe):,} proteins parsed from {where} are {adjective}. {hint}"
+        )
+
+
+def parse_tiers(value):
+    """Parse --tiers into a frozenset of indices into TIERS.
+
+    Names rather than indices on purpose: an index list is positional, and TIERS
+    has been reordered once already -- a --tiers 0,2 sitting in someone's config
+    would then quietly mean something else.
+    """
+    names = [name.strip() for name in str(value).split(",") if name.strip()]
+    if not names:
+        raise argparse.ArgumentTypeError(f"--tiers is empty; name at least one of {', '.join(TIERS)}")
+    unknown = [name for name in names if name not in TIERS]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"--tiers has unknown stratum name(s) {', '.join(unknown)}; valid names are {', '.join(TIERS)}"
+        )
+    return frozenset(TIERS.index(name) for name in names)
 
 
 def parse_dead(text):
@@ -323,24 +445,18 @@ class Reservoir:
         return j if j < self.k else None
 
 
-def tier_of(taxon_id, accession, reviewed):
+def tier_of(taxon_id, reviewed):
     """Classify one instance into a disjoint tier index (0 = most preferred).
 
-    Keyed on the numeric taxon straight out of the flat file's OX line, replacing
-    the organism mnemonic Pfam-A.fasta's deflines used to carry. `reviewed` stays a
-    parameter rather than becoming `True`: with a Swiss-Prot universe every
-    accession is reviewed and tiers 1 and 3 never fill, but the ladder is what
-    makes adding a TrEMBL source later a data change instead of a redesign.
+    Both inputs ride on the universe record: the numeric taxon straight out of the
+    flat file's OX line, and the review flag off its ID line. Reviewed outranks
+    human, so a curated mouse domain sorts above an auto-annotated human one --
+    see TIERS.
     """
     is_human = taxon_id == HUMAN_TAXON
-    is_reviewed = accession in reviewed
-    if is_human and is_reviewed:
-        return 0
-    if is_human:
-        return 1
-    if is_reviewed:
-        return 2
-    return 3
+    if reviewed:
+        return 0 if is_human else 1
+    return 2 if is_human else 3
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +468,7 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
     """One pass over Pfam-A.regions.tsv, returning ({family: [record]}, stats, seen_families).
 
     A record is a dict with instance_id, family, protein_id, taxon_id, start, end,
-    tier and sequence. `eligible` is a set of tier indices (see TIER_ELIGIBILITY);
+    tier and sequence. `eligible` is a set of tier indices (see TIERS and --tiers);
     records in any other tier are counted and dropped, so a family can appear in
     `seen_families` and still be absent from the returned mapping. That is what
     separates "Pfam has no such family" from "Pfam has it but not in a tier we
@@ -362,11 +478,11 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
     offered per (family, tier), so a family is spread over parents rather than
     filled from whichever protein happens to carry the most copies of the domain.
 
-    `universe` is {accession: (taxon_id, sequence)} from parse_uniprot_dat. A region
-    whose protein is absent from it is counted and skipped -- at full scale that is
-    most of the file, because Pfam covers every reference proteome while the universe
-    is Swiss-Prot. Membership in `universe` is also what `reviewed` means, so the
-    tier lookup reads its keys.
+    `universe` is {accession: (taxon_id, sequence, reviewed)} from parse_uniprot_dat.
+    A region whose protein is absent from it is counted and skipped -- at full scale
+    that is most of the file, because Pfam covers every reference proteome while the
+    universe is only whatever flat files were passed. The review flag rides on the
+    record, so the tier lookup needs no second table.
 
     Unlike the Pfam-A.fasta pass this replaces, a record is complete at its own row:
     the sequence is sliced out of the parent rather than accumulated over following
@@ -385,7 +501,7 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
     product is what matters, and the target scales it exactly as the factor does.
     """
     if eligible is None:
-        eligible = TIER_ELIGIBILITY["any"]
+        eligible = frozenset(range(N_TIERS))
     reservoirs = {}
     parent_cap = max(1, pool_size // PARENT_CAP_DIVISOR)
     parent_offers = defaultdict(Counter)
@@ -432,9 +548,9 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
         if entry is None:
             stats["not_in_universe"] += 1
             continue
-        taxon_id, parent = entry
+        taxon_id, parent, reviewed = entry
 
-        tier = tier_of(taxon_id, accession, universe)
+        tier = tier_of(taxon_id, reviewed)
         stats[f"tier_{TIERS[tier]}_offered"] += 1
         if tier not in eligible:
             stats["ineligible_tier_records"] += 1
@@ -486,16 +602,24 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
             "start": start_s,
             "end": end_s,
             "tier": tier,
+            "reviewed": reviewed,
             "sequence": sequence,
         }
 
     if columns is None:
         raise RuntimeError("Pfam-A.regions stream was empty -- not even a header row")
 
-    # Fill each family from tier 0 upward until pool_size. When a tier holds
-    # more survivors than there is room for, sample rather than truncate --
-    # taking the first few would bias towards whatever order the file happens
-    # to be in within that tier.
+    # Fill each family from tier 0 upward until pool_size, and fill *freely*
+    # rather than as a top-up: a family with 3 human_reviewed regions and room for
+    # 25 keeps those 3 and takes the other 22 out of other_reviewed -- it does not
+    # stop because the top stratum was non-empty. Deliberate, and the alternative
+    # (fall through only below a floor) is the obvious thing to assume: a
+    # better-conditioned pool for every family is worth a DDI occasionally being
+    # represented by two non-human domains.
+    #
+    # When a tier holds more survivors than there is room for, sample rather than
+    # truncate -- taking the first few would bias towards whatever order the file
+    # happens to be in within that tier.
     #
     # Parent proteins are preferred over extra regions of one protein: Pfam
     # routinely gives one protein several regions of the same family, and a
@@ -566,7 +690,7 @@ def _spread_over_parents(rng, records, room):
 # ---------------------------------------------------------------------------
 
 
-def write_instances_tsv(path, by_family, clans, reviewed):
+def write_instances_tsv(path, by_family, clans):
     """Write the one table MAKE_METIS, the splitters and SELECT_EXAMPLES all read.
 
     MAKE_METIS takes instance_id -> clan, the splitters invert to
@@ -587,7 +711,7 @@ def write_instances_tsv(path, by_family, clans, reviewed):
                         rec["start"],
                         rec["end"],
                         rec["taxon_id"],
-                        "reviewed" if rec["protein_id"] in reviewed else "unreviewed",
+                        "reviewed" if rec["reviewed"] else "unreviewed",
                     ]
                 )
 
@@ -598,7 +722,7 @@ def classify_dropped(families, by_family, seen_families, dead):
     Three distinct causes, and conflating them would hide the one that is a
     configuration choice rather than a fact about Pfam: a family absent from the
     stream is dead or mistyped, while a family *present* in the stream with
-    nothing in an eligible tier is --tier doing exactly what it was asked to.
+    nothing in an eligible tier is --tiers doing exactly what it was asked to.
     """
     dropped = []
     for family in sorted(families):
@@ -706,15 +830,15 @@ def content_digest(items):
     return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()
 
 
-def derived_key(release, families, pool_size, seed, universe_digest, tier):
+def derived_key(release, families, pool_size, seed, universe_digest, tiers):
     """Hash every input that can change the cached instance set or its columns.
 
-    `tier` is in here for the obvious reason and one less obvious one: it decides
-    which strata may be filled *and* how wide the protein universe is parsed
-    (eligible_taxa), so a warm cache written under --tier any would otherwise serve
-    a --tier human_only run non-human instances, which downstream (domainsplit's
-    human-only ingest) is a hard failure several steps later rather than a wrong
-    number here.
+    `tiers` is the sorted tier-name list, joined by ",". It is in here for the
+    obvious reason and one less obvious one: it decides which strata may be filled
+    *and* how wide the protein universe is parsed (eligible_taxa), so a warm cache
+    written under a wider tier set would otherwise serve a human-only run non-human
+    instances, which downstream (domainsplit's human-only ingest) is a hard failure
+    several steps later rather than a wrong number here.
 
     `universe_digest` covers the Swiss-Prot flat file and belongs in here as much as
     the Pfam release does. It is now the *whole* join partner -- coordinates come
@@ -731,7 +855,7 @@ def derived_key(release, families, pool_size, seed, universe_digest, tier):
             release,
             str(pool_size),
             str(seed),
-            tier,
+            tiers,
             universe_digest,
             ",".join(sorted(families)),
         ]
@@ -779,19 +903,29 @@ def parse_args():
     parser.add_argument("--pool-size", type=int, default=5, help="instances sampled per family (M); default 5")
     parser.add_argument("--seed", type=int, default=42, help="sampling seed; default 42")
     parser.add_argument(
-        "--tier",
-        choices=sorted(TIER_ELIGIBILITY),
-        default="any",
-        help="which strata may be sampled: 'any' fills all four in preference order, "
-        "'human_only' makes the two non-human strata ineligible, so a family with no "
-        "human instance ends with zero instances; default any",
+        "--tiers",
+        type=parse_tiers,
+        # argparse runs `type` over a string default too, so this arrives as a
+        # frozenset of indices whether or not the flag was given.
+        default=",".join(DEFAULT_TIERS),
+        metavar="NAME[,NAME...]",
+        help="comma-separated strata to sample, out of " + ", ".join(TIERS) + ". They fill "
+        "in that order whatever order they are named in; a stratum left out is never "
+        "offered a record, so a family with nothing in a named one keeps zero instances "
+        "and its DDIs drop out. The unreviewed strata need a TrEMBL --uniprot-dat; "
+        f"default {','.join(DEFAULT_TIERS)}",
     )
     parser.add_argument("--clans", help="precomputed Pfam-A.clans.tsv(.gz), skipping that download")
     parser.add_argument("--pfam-regions", help="local Pfam-A.regions.tsv.gz, skipping the 4.7 GB download")
     parser.add_argument(
         "--uniprot-dat",
-        help="local uniprot_sprot.dat.gz -- the protein universe: sequence, taxon and, by "
-        "being Swiss-Prot, the reviewed set. Downloaded (~600 MB) when not given",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="local UniProt flat file (.dat.gz) -- the protein universe: sequence, taxon "
+        "and the review flag. Repeatable, and Swiss-Prot must come first because the "
+        "first file carrying an accession wins. Swiss-Prot alone is downloaded (~600 MB) "
+        "when none is given, which can only fill the reviewed strata",
     )
     parser.add_argument("--interpro-cache", help="directory for cached downloads and sampled instances")
     parser.add_argument("--cache-regions", action="store_true", help="also cache Pfam-A.regions.tsv.gz (~4.7 GB)")
@@ -809,10 +943,10 @@ def main():
     dropped_out = f"{prefix}dropped_families.tsv"
 
     families = read_families(args)
-    eligible = TIER_ELIGIBILITY[args.tier]
+    eligible = args.tiers
+    tier_names = [TIERS[t] for t in sorted(eligible)]
     print(
-        f"Requested {len(families):,} Pfam families "
-        f"(--tier {args.tier}: {', '.join(TIERS[t] for t in sorted(eligible))})",
+        f"Requested {len(families):,} Pfam families (--tiers {','.join(tier_names)})",
         file=sys.stderr,
     )
 
@@ -826,31 +960,34 @@ def main():
             clans = parse_clans(fh.read())
     else:
         clans = parse_clans(cache.text("Pfam-A.clans.tsv", PFAM_CLANS_URL, gzipped=True))
-    # The protein universe, narrowed to the taxa this tier can use while it is
+    # The protein universe, narrowed to the taxa this tier set can use while it is
     # parsed -- see eligible_taxa(). Parsed before the cache key is computed
     # because its accession set *is* the key's UniProt component.
     taxa_filter = eligible_taxa(eligible)
-    dat_path = args.uniprot_dat or cache.path("uniprot_sprot.dat.gz")
-    if not args.uniprot_dat:
-        if not dat_path:
+    dat_paths = list(args.uniprot_dat)
+    if not dat_paths:
+        cached_dat = cache.path("uniprot_sprot.dat.gz")
+        if not cached_dat:
             raise RuntimeError(
                 "--uniprot-dat is required when --interpro-cache is not set: the flat "
                 "file is the protein universe and there is nowhere to cache it"
             )
-        if not os.path.exists(dat_path):
-            print(f"Caching {SPROT_URL} to {dat_path} (~600 MB)...", file=sys.stderr)
-            download_to_file(SPROT_URL, dat_path)
-    print(f"Reading the protein universe from {dat_path}...", file=sys.stderr)
-    with open(dat_path, "rb") as fh:
-        universe = parse_uniprot_dat(iter_gzip_lines(fh), taxa_filter)
-    if not universe:
-        raise RuntimeError(
-            f"{dat_path} yielded no proteins"
-            + (f" for taxon(s) {', '.join(sorted(taxa_filter))}" if taxa_filter else "")
-            + " -- every region would be dropped as not_in_universe"
+        if not os.path.exists(cached_dat):
+            print(f"Caching {SPROT_URL} to {cached_dat} (~600 MB)...", file=sys.stderr)
+            download_to_file(SPROT_URL, cached_dat)
+        dat_paths = [cached_dat]
+        print(
+            "No --uniprot-dat given: falling back to Swiss-Prot, which can only fill "
+            f"{TIERS[0]} and {TIERS[1]}",
+            file=sys.stderr,
         )
-    # Swiss-Prot *is* the reviewed set, so the universe doubles as it.
-    reviewed = universe
+    print(f"Reading the protein universe from {len(dat_paths)} flat file(s)...", file=sys.stderr)
+    # load_universe() has already failed on any file that added nothing, so the
+    # universe cannot be empty here.
+    universe = load_universe(dat_paths, taxa_filter)
+    # Before the 4.7 GB pass, not after it: a stratum the universe cannot serve is
+    # otherwise indistinguishable from a run that simply kept fewer families.
+    check_universe_covers(eligible, universe, dat_paths)
     print(
         f"Reference tables: {len(clans):,} families, {len(universe):,} proteins"
         + (f" (taxon {', '.join(sorted(taxa_filter))})" if taxa_filter else " (all taxa)"),
@@ -863,7 +1000,7 @@ def main():
         args.pool_size,
         args.seed,
         content_digest(universe),
-        args.tier,
+        ",".join(sorted(tier_names)),
     )
     cached_instances = cache.path(f"instances-{key}.tsv")
     cached_sequences = cache.path(f"sequences-{key}.fasta")
@@ -902,7 +1039,7 @@ def main():
                     iter_gzip_lines(resp), wanted, args.pool_size, universe, args.seed, eligible
                 )
 
-        write_instances_tsv(instances_out, by_family, clans, reviewed)
+        write_instances_tsv(instances_out, by_family, clans)
         seqs = {rec["instance_id"]: rec["sequence"] for recs in by_family.values() for rec in recs}
         write_fasta(seqs, seqs.keys(), fasta_out)
 
@@ -938,7 +1075,7 @@ def main():
         print(f"Scanned {stats['records']:,} Pfam-A region rows", file=sys.stderr)
         for index, tier in enumerate(TIERS):
             offered, kept = stats[f"tier_{tier}_offered"], stats[f"tier_{tier}_kept"]
-            gate = "" if index in eligible else "  [ineligible under --tier]"
+            gate = "" if index in eligible else "  [not named in --tiers]"
             print(f"  tier {tier}: {offered:,} offered, {kept:,} kept{gate}", file=sys.stderr)
         if stats["parent_cap_skipped"]:
             print(
@@ -961,7 +1098,7 @@ def main():
             if stats[label]:
                 print(f"Warning: {stats[label]:,} {message}", file=sys.stderr)
 
-    # One warning per reason, so "--tier dropped 4,000 families" cannot hide
+    # One warning per reason, so "--tiers dropped 4,000 families" cannot hide
     # among dead accessions -- the first is a knob, the second is Pfam's history.
     by_reason = defaultdict(list)
     for family, reason in dropped:

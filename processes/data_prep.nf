@@ -32,7 +32,7 @@ process FETCH_DOMAIN_META {
     tuple val(meta), path(families)  // plain text, one Pfam family accession per line
     path clans                       // Pfam-A.clans.tsv(.gz), or [] to download it
     path pfam_regions                // local Pfam-A.regions.tsv.gz, or [] to stream it from EBI
-    path uniprot_dat                 // local uniprot_sprot.dat.gz, or [] to download it
+    path uniprot_dats                // UniProt flat file(s), Swiss-Prot first, or [] to download Swiss-Prot
     val cache_dir                    // absolute cache directory, or '' for no cache
 
     output:
@@ -50,7 +50,14 @@ process FETCH_DOMAIN_META {
     def pool_size   = (params.ddi_examples_target as int) * (params.ddi_examples_pool_factor as int)
     def clans_arg   = clans      ? "--clans ${clans}"           : ''
     def regions_arg = pfam_regions ? "--pfam-regions ${pfam_regions}" : ''
-    def dat_arg     = uniprot_dat  ? "--uniprot-dat ${uniprot_dat}"   : ''
+    // Repeatable: the universe is the union of these files, first writer winning
+    // on a duplicate accession, so their order is Swiss-Prot-then-TrEMBL and comes
+    // from the caller. A single staged path arrives as a Path, not a list.
+    def dats        = uniprot_dats instanceof List ? uniprot_dats : (uniprot_dats ? [uniprot_dats] : [])
+    def dat_arg     = dats.collect { "--uniprot-dat ${it}" }.join(' ')
+    // params.instance_tiers may be a List (config) or a comma-separated String (CLI),
+    // the same dual shape as params.mqc_order. DATA_PREP_DDI validates the names.
+    def tiers       = params.instance_tiers instanceof List ? params.instance_tiers.join(',') : params.instance_tiers
     // The one input that cannot be staged, because the task writes to it: a
     // relative --interpro-cache would resolve inside the work directory and be
     // thrown away with it. DATA_PREP_DDI absolutises the param for that reason.
@@ -61,7 +68,7 @@ process FETCH_DOMAIN_META {
         --families  ${families} \\
         --pool-size ${pool_size} \\
         --seed      ${params.seed} \\
-        --tier      ${params.instance_tier} \\
+        --tiers     ${tiers} \\
         ${clans_arg} \\
         ${cache_arg} \\
         ${regions_arg} \\

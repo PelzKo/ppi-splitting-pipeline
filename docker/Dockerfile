@@ -1,8 +1,9 @@
 # One image for every process in the pipeline, matching the single-conda-env
 # style of `-profile conda` (there are no per-process containers).
 #
-# Build and push:
-#   docker build -t docker.io/konstantinpelz/ppi-splitting:<tag> .
+# Build and push -- from the repository root, not from docker/: the build context
+# has to contain environment.yml and bin/, which the COPY lines below reach.
+#   docker build -f docker/Dockerfile -t docker.io/konstantinpelz/ppi-splitting:<tag> .
 #   docker push  docker.io/konstantinpelz/ppi-splitting:<tag>
 #
 # <tag> must equal the git tag of the commit it is built from, and

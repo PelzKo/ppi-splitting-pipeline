@@ -1,0 +1,93 @@
+# Minimal image for `--split_only` runs: just the ILP splitting core, none of the
+# fetch/BLAST/KaHIP/embedding/report machinery.
+#
+# Build and push (build context is irrelevant here -- nothing is COPYed in -- but
+# stay in the repository root so the two Dockerfiles are built the same way):
+#   docker build -f docker/Dockerfile.split_only -t docker.io/konstantinpelz/ppi-splitting-split-only:<tag> .
+#   docker push  docker.io/konstantinpelz/ppi-splitting-split-only:<tag>
+#
+# Point a run at it with `-c` or `--process.container`; there is deliberately no
+# profile in nextflow.config for it:
+#   nextflow run main.nf --samplesheet s.csv --split_only \
+#       -with-docker docker.io/konstantinpelz/ppi-splitting-split-only:<tag>
+#
+# TWO THINGS THIS IMAGE DOES *NOT* DO, both on purpose:
+#
+#   1. It does not carry bin/. Nextflow puts the root project's bin/ on PATH, so
+#      this image works for **standalone runs only** -- exactly the same
+#      limitation `-profile conda` has. A pipeline that includes PPI_SPLITTING as
+#      a subworkflow must use docker/Dockerfile instead, whose baked-in bin/ is
+#      the whole reason that image exists. The upside is that this image's tag is
+#      *not* tied to a git tag: a bin/*.py change does not stale it.
+#
+#   2. It does not read environment.yml. Every package is named and pinned below,
+#      so this file is self-contained and installs nothing `--split_only` cannot
+#      use. The cost is that the two images can drift: a dependency bump in
+#      environment.yml does not reach here. If a `--split_only` run behaves
+#      differently under this image than under `-profile conda`, compare the pins
+#      below against environment.yml first.
+#
+# WHAT `--split_only` ACTUALLY RUNS, and therefore what is installed:
+#
+#   GET_LENGTHS            awk/sort            (base image)
+#   EMPTY_GO_ANNOTATIONS   printf              (base image, --ddi_mode only)
+#   SORT_PPIS              sort_ppis.py        stdlib only
+#   SOLVE_ILP              solve_ilp.py        cvxpy, numpy
+#   CDHIT2D                cd-hit-2d           cd-hit
+#   REMOVE_REDUNDANT       remove_redundant.py stdlib only
+#   SELECT_EXAMPLES        select_examples.py  cvxpy, numpy, scipy (--ddi_mode only)
+#   SAMPLE_NEGATIVES_ILP   sample_negatives_ilp.py  cvxpy, numpy, scipy
+#   SAMPLE_NEGATIVES_DEGREE sample_negatives.py stdlib only
+#   EXPAND_NEGATIVES       expand_negatives.py stdlib only  (--ddi_mode only)
+#
+# Both --ddi_mode and PPI mode are covered: the DDI-only processes above need
+# nothing the PPI ones do not. What is *absent* relative to the full image:
+# blast, kahip, multiqc, scikit-learn, matplotlib, plotly, torch, transformers,
+# sentencepiece, protobuf, certifi -- CLUSTERING, TRAIN_BASELINE and QC never
+# run in this mode, and the fetch cannot (`--split_only` requires precomputed
+# sequences/species/annotations).
+FROM mambaorg/micromamba:2.0.5
+
+USER root
+
+# procps: Nextflow's trace/`ps` polling. ca-certificates: HTTPS for a Gurobi WLS
+# license check-out, the one network call a --split_only task can make.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Exact pins, not ranges: the image tag is then one exact toolchain, and two
+# builds of it cannot resolve different solver versions -- which would change
+# ILP results, not just performance. Bump deliberately.
+#
+# cd-hit 4.8.1 provides cd-hit-2d (CDHIT2D). pyscipopt is the SCIP fallback for
+# ilp_solver/neg_ilp_solver when Gurobi is unavailable.
+RUN micromamba install -y -n base -c conda-forge -c bioconda \
+      python=3.14.7 \
+      numpy=2.5.2 \
+      scipy=1.18.0 \
+      pyscipopt=6.2.1 \
+      cd-hit=4.8.1 \
+ && micromamba clean --all --yes
+ENV PATH=/opt/conda/bin:$PATH
+
+# cvxpy and its solver stack from pip, matching what environment.yml's pip:
+# section installs. Every transitive dependency of cvxpy 1.9.2 is pinned here
+# too, so pip resolves nothing at build time:
+#   osqp/clarabel/scs/qdldl/sparsediffpy  cvxpy's own required backends
+#   highspy                               HiGHS, the OSS MIP fallback
+#   gurobipy                              the [GUROBI] extra (default ilp_solver)
+# numpy and scipy are already satisfied by the conda layer above, so they are
+# not repeated -- pip sees the conda dists and leaves them alone.
+ENV PIP_NO_CACHE_DIR=1
+RUN pip install --no-cache-dir \
+      cvxpy==1.9.2 \
+      osqp==1.1.3 \
+      clarabel==0.11.1 \
+      scs==3.2.11 \
+      qdldl==0.1.9.post1 \
+      sparsediffpy==0.3.0 \
+      highspy==1.15.1 \
+      gurobipy==13.0.3
+
+USER $MAMBA_USER

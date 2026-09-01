@@ -64,12 +64,16 @@ workflow DATA_PREP_DDI {
         ? channel.value(file(params.pfam_regions, checkIfExists: true))
         : channel.value([])
 
-    // The protein universe: Pfam-A.regions carries coordinates only, so sequence
-    // and taxon come from the Swiss-Prot flat file, and membership in it is what
-    // "reviewed" means. Staged like the other two so it lands in the task hash.
-    dat_ch = params.uniprot_dat
-        ? channel.value(file(params.uniprot_dat, checkIfExists: true))
-        : channel.value([])
+    // The protein universe: Pfam-A.regions carries coordinates only, so sequence,
+    // taxon and the review flag all come from UniProt flat files. Several may be
+    // given -- Swiss-Prot first, then a TrEMBL file if an unreviewed stratum is in
+    // --instance_tiers -- as a List or a comma-separated string. Staged like the
+    // other two so they land in the task hash and get checkIfExists.
+    def dat_raw = !params.uniprot_dat
+        ? []
+        : (params.uniprot_dat instanceof List ? params.uniprot_dat : params.uniprot_dat.toString().split(','))
+    def dat_files = dat_raw.collect { it.toString().trim() }.findAll { it }.collect { file(it, checkIfExists: true) }
+    dat_ch = channel.value(dat_files)
 
     // The cache is the exception: FETCH_DOMAIN_META *writes* to it, so it cannot
     // be staged, and a relative path would resolve inside the task's work dir and
@@ -81,15 +85,29 @@ workflow DATA_PREP_DDI {
         log.warn "--interpro_cache ${cache_dir} does not exist yet; FETCH_DOMAIN_META will create it."
     }
 
-    // FETCH_DOMAIN_META reads --instance_tier straight from params (so an
+    // FETCH_DOMAIN_META reads --instance_tiers straight from params (so an
     // embedding pipeline needs no wiring for it), which puts the value past
     // channel construction and into fetch_domains.py's argparse. Check it here
-    // instead: a typo should not survive as far as a scheduled task.
-    if (!(params.instance_tier in ['any', 'human_only'])) {
-        error("--instance_tier must be 'any' or 'human_only', got '${params.instance_tier}'.")
+    // instead: a typo should not survive as far as a scheduled task. The name list
+    // is duplicated from fetch_domains.py's TIERS -- Groovy cannot read it, and the
+    // two must be changed together.
+    def validTiers = ['human_reviewed', 'other_reviewed', 'human_unreviewed', 'other_unreviewed']
+    def tiersRaw = params.instance_tiers instanceof List ? params.instance_tiers : params.instance_tiers.toString().split(',')
+    def tiers = tiersRaw.collect { it.toString().trim() }.findAll { it }
+    if (!tiers) {
+        error("--instance_tiers is empty; name at least one of ${validTiers.join(', ')}.")
     }
-    if (params.instance_tier == 'human_only') {
-        log.info "--instance_tier human_only: families with no human Pfam region keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
+    def unknownTiers = tiers - validTiers
+    if (unknownTiers) {
+        error("--instance_tiers has unknown stratum name(s) ${unknownTiers.join(', ')}; valid names are ${validTiers.join(', ')}.")
+    }
+    log.info "--instance_tiers ${tiers.join(',')}: families with nothing in a named stratum keep zero instances, and every DDI touching one drops out (see _shared/data/dropped_families.tsv)."
+    // A warning, not an error, for the same reason the uniprot_dat guard below is
+    // absent: this block runs for every DDI-mode workflow, including one that
+    // supplies precomputed instances and never reaches FETCH_DOMAIN_META. On the
+    // path that does need it, fetch_domains.py fails hard before the regions pass.
+    if (tiers.any { it.endsWith('unreviewed') } && !dat_files) {
+        log.warn "--instance_tiers names an unreviewed stratum but no --uniprot_dat was given; the Swiss-Prot download can only fill the reviewed strata and FETCH_DOMAIN_META will fail. Pass a TrEMBL flat file too."
     }
     // No guard here on --uniprot_dat / --interpro_cache. This block runs on *every*
     // DDI-mode workflow, including an embedding pipeline that supplies precomputed

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Checks for bin/fetch_domains.py's regions-based instance sampling.
+"""Checks for bin/fetch_domains.py's regions-based instance sampling and tier strata.
 
 The reason this file exists: instances used to come from ``Pfam-A.fasta.gz``, which
 Pfam publishes 90 % non-redundant. For a conserved family the human member is
->=90 % identical to another organism's and is dropped, so ``--tier human_only``
+>=90 % identical to another organism's and is dropped, so a human-only tier set
 reported ``no_eligible_instances`` for families that human demonstrably carries --
 10 566 of 12 769 on a real request. ``Pfam-A.regions.tsv.gz`` has no redundancy
-reduction, and the Swiss-Prot flat file supplies the sequence and taxon it lacks.
+reduction, and UniProt flat files supply the sequence, taxon and review flag it lacks.
 
 What is asserted here is the part that can silently drift:
 
@@ -14,8 +14,17 @@ What is asserted here is the part that can silently drift:
   embedding pipeline downstream both parse them positionally-by-name;
 * ``instance_id`` construction and the 1-based inclusive slice, because embedding
   HDF5 keys are built from it and a one-off error is invisible;
-* the human-identical invariant: a family's human instances under ``--tier any``
-  are exactly the ones it keeps under ``human_only``;
+* the review flag: parsed off the ID line, fatal when absent, and written through
+  to ``source_db`` per instance rather than as a constant;
+* the four strata and their fill order -- **reviewed outranks human**, so a family
+  with no human Swiss-Prot member takes a curated non-human sequence before an
+  auto-annotated human one;
+* the merge of several ``--uniprot-dat`` files, where the first file carrying an
+  accession wins so Swiss-Prot can be layered under TrEMBL;
+* the guard that fails a tier set the parsed universe can never fill -- the one
+  failure mode that looks exactly like a successful run with fewer families;
+* the subset invariant: a family's human-reviewed instances under the full tier
+  set are exactly the ones it keeps under ``--tiers human_reviewed``;
 * that a region whose parent is outside the universe is skipped, not guessed at;
 * that filling a family prefers distinct parent proteins, which is the quantity
   SELECT_EXAMPLES and an external test set are short of.
@@ -26,6 +35,7 @@ Runs end to end with local fixtures and no network at all. Run directly
 
 import csv
 import gzip
+import io
 import os
 import subprocess
 import sys
@@ -40,13 +50,18 @@ FETCH = os.path.join(BIN, "fetch_domains.py")
 
 from fetch_domains import (  # noqa: E402
     INSTANCE_COLUMNS,
-    TIER_ELIGIBILITY,
+    TIERS,
+    check_universe_covers,
     eligible_taxa,
+    load_universe,
+    parse_tiers,
     parse_uniprot_dat,
     tier_of,
 )
 
 ENV = dict(os.environ, PYTHONPATH=BIN + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+ALL_TIERS = ",".join(TIERS)
 
 REGIONS_HEADER = [
     "pfamseq_acc", "seq_version", "crc64", "md5",
@@ -55,9 +70,11 @@ REGIONS_HEADER = [
 
 # PF00001: one human protein with two regions, plus a second human protein -- so
 # "prefer distinct parents" has something to prefer. PF00002: human + mouse, which
-# is what separates human_only from any. PF00003: mouse only, so human_only must
-# drop it with no_eligible_instances rather than fall back. PF00009: a region whose
-# parent is not in the DAT at all.
+# is what separates a human-only tier set from the full one. PF00003: mouse only,
+# so human_reviewed must drop it with no_eligible_instances rather than fall back.
+# PF00006: mouse-reviewed against human-unreviewed, which is the fill-order test.
+# PF00007: human but unreviewed only. PF00008: non-human and unreviewed only.
+# PF00009: a region whose parent is not in the DAT at all.
 REGIONS = [
     ("P11111", "PF00001", 10, 20, 11, 19),
     ("P11111", "PF00001", 50, 62, 51, 60),
@@ -65,6 +82,10 @@ REGIONS = [
     ("P33333", "PF00002", 1, 12, 2, 11),
     ("Q44444", "PF00002", 3, 14, 4, 13),
     ("Q55555", "PF00003", 7, 17, 8, 16),
+    ("Q66666", "PF00006", 1, 12, 1, 12),
+    ("U77777", "PF00006", 2, 14, 2, 13),
+    ("U77777", "PF00007", 3, 15, 3, 14),
+    ("U88888", "PF00008", 1, 12, 1, 11),
     ("P99999", "PF00009", 1, 10, 1, 10),   # P99999 absent from the DAT
     ("P66666", "PF00004", 900, 999, 901, 990),  # coordinates past the sequence end
 ] + [
@@ -76,19 +97,50 @@ REGIONS = [
     ("P88888", "PF00005", 1, 6, 1, 6),
 ]
 
-# accession -> (taxon, sequence). Sequences are long enough for every slice above.
+# accession -> (taxon, reviewed, sequence). Sequences are long enough for every
+# slice above. The four strata all have a member: human+reviewed, non-human+
+# reviewed (Q4/Q5/Q6), human+unreviewed (U77777) and non-human+unreviewed (U88888).
 PROTEINS = {
-    "P11111": ("9606", "".join(f"{i % 10}" for i in range(80)).replace("0", "A")),
-    "P22222": ("9606", "M" * 40),
-    "P33333": ("9606", "K" * 40),
-    "Q44444": ("10090", "L" * 40),
-    "Q55555": ("10090", "V" * 40),
-    "P66666": ("9606", "W" * 40),
-    "P77777": ("9606", "R" * 40),
-    "P88888": ("9606", "S" * 40),
+    "P11111": ("9606", True, "".join(f"{i % 10}" for i in range(80)).replace("0", "A")),
+    "P22222": ("9606", True, "M" * 40),
+    "P33333": ("9606", True, "K" * 40),
+    "Q44444": ("10090", True, "L" * 40),
+    "Q55555": ("10090", True, "V" * 40),
+    "Q66666": ("10090", True, "C" * 40),
+    "U77777": ("9606", False, "D" * 40),
+    "U88888": ("10090", False, "E" * 40),
+    "P66666": ("9606", True, "W" * 40),
+    "P77777": ("9606", True, "R" * 40),
+    "P88888": ("9606", True, "S" * 40),
 }
 
-FAMILIES = ["PF00001", "PF00002", "PF00003", "PF00004", "PF00005", "PF00009"]
+FAMILIES = [
+    "PF00001", "PF00002", "PF00003", "PF00004", "PF00005",
+    "PF00006", "PF00007", "PF00008", "PF00009",
+]
+
+# What a *human-only* --tiers run may keep, whatever else changes around it.
+HUMAN_REVIEWED = {acc for acc, (taxon, reviewed, _s) in PROTEINS.items() if taxon == "9606" and reviewed}
+
+
+def dat_entry(acc, taxon, reviewed, seq):
+    out = io.StringIO()
+    status = "Reviewed;" if reviewed else "Unreviewed;"
+    out.write(f"ID   {acc}_TEST   {status}   {len(seq)} AA.\n")
+    out.write(f"AC   {acc};\n")
+    out.write(f"OX   NCBI_TaxID={taxon};\n")
+    out.write(f"SQ   SEQUENCE   {len(seq)} AA;  0 MW;  0 CRC64;\n")
+    for i in range(0, len(seq), 60):
+        out.write(f"     {seq[i:i + 60]}\n")
+    out.write("//\n")
+    return out.getvalue()
+
+
+def write_dat(path, entries):
+    with gzip.open(path, "wt") as fh:
+        for acc, (taxon, reviewed, seq) in entries.items():
+            fh.write(dat_entry(acc, taxon, reviewed, seq))
+    return path
 
 
 def write_fixtures(tmp):
@@ -99,16 +151,7 @@ def write_fixtures(tmp):
         for acc, fam, s_start, s_end, a_start, a_end in REGIONS:
             w.writerow([acc, "1", "CRC", "MD5", fam, s_start, s_end, a_start, a_end])
 
-    dat = os.path.join(tmp, "uniprot_sprot.dat.gz")
-    with gzip.open(dat, "wt") as fh:
-        for acc, (taxon, seq) in PROTEINS.items():
-            fh.write(f"ID   {acc}_TEST   Reviewed;   {len(seq)} AA.\n")
-            fh.write(f"AC   {acc};\n")
-            fh.write(f"OX   NCBI_TaxID={taxon};\n")
-            fh.write(f"SQ   SEQUENCE   {len(seq)} AA;  0 MW;  0 CRC64;\n")
-            for i in range(0, len(seq), 60):
-                fh.write(f"     {seq[i:i + 60]}\n")
-            fh.write("//\n")
+    dat = write_dat(os.path.join(tmp, "uniprot.dat.gz"), PROTEINS)
 
     clans = os.path.join(tmp, "Pfam-A.clans.tsv.gz")
     with gzip.open(clans, "wt") as fh:
@@ -120,30 +163,40 @@ def write_fixtures(tmp):
     return regions, dat, clans, families
 
 
-def run(tmp, tier, pool_size=25):
+def slug(tiers):
+    return tiers.replace(",", "+")
+
+
+def run(tmp, tiers, pool_size=25, dats=None, check=True, out_name=None):
     regions, dat, clans, families = write_fixtures(tmp)
-    out = os.path.join(tmp, tier)
+    out = os.path.join(tmp, out_name or slug(tiers))
     os.makedirs(out, exist_ok=True)
-    proc = subprocess.run(
-        [sys.executable, FETCH,
-         "--families", families,
-         "--pool-size", str(pool_size),
-         "--seed", "42",
-         "--tier", tier,
-         "--clans", clans,
-         "--pfam-regions", regions,
-         "--uniprot-dat", dat,
-         "--pfam-release", "38.2"],
-        cwd=out, env=ENV, capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
+    cmd = [sys.executable, FETCH,
+           "--families", families,
+           "--pool-size", str(pool_size),
+           "--seed", "42",
+           "--tiers", tiers,
+           "--clans", clans,
+           "--pfam-regions", regions,
+           "--pfam-release", "38.2"]
+    for path in (dats if dats is not None else [dat]):
+        cmd += ["--uniprot-dat", path]
+    proc = subprocess.run(cmd, cwd=out, env=ENV, capture_output=True, text=True)
+    if check and proc.returncode != 0:
         raise AssertionError(f"fetch_domains.py failed:\n{proc.stderr}")
-    return out, proc.stderr
+    if check:
+        return out, proc.stderr
+    return out, proc
 
 
 def read_instances(out):
     with open(os.path.join(out, "instances.tsv"), newline="") as fh:
         return list(csv.DictReader(fh, delimiter="\t"))
+
+
+def read_dropped(out):
+    with open(os.path.join(out, "dropped_families.tsv"), newline="") as fh:
+        return {r["family"]: r["reason"] for r in csv.DictReader(fh, delimiter="\t")}
 
 
 def read_fasta(out):
@@ -159,30 +212,92 @@ def read_fasta(out):
 
 
 def test_unit_helpers():
-    assert eligible_taxa(TIER_ELIGIBILITY["human_only"]) == {"9606"}
-    assert eligible_taxa(TIER_ELIGIBILITY["any"]) is None
-    # Taxon, not organism mnemonic, and reviewed-ness still splits the ladder.
-    assert tier_of("9606", "P1", {"P1"}) == 0
-    assert tier_of("9606", "P1", set()) == 1
-    assert tier_of("10090", "P1", {"P1"}) == 2
-    assert tier_of("10090", "P1", set()) == 3
+    # The human strata are {0, 2} under the reviewed-outranks-human ordering. Get
+    # this wrong and a human-only run parses the whole of Swiss-Prot -- a silent
+    # 6x cost rather than a failure.
+    assert eligible_taxa(parse_tiers("human_reviewed")) == {"9606"}
+    assert eligible_taxa(parse_tiers("human_reviewed,human_unreviewed")) == {"9606"}
+    assert eligible_taxa(parse_tiers("human_reviewed,other_reviewed")) is None
+    assert eligible_taxa(parse_tiers(ALL_TIERS)) is None
+
+    assert parse_tiers("human_reviewed") == frozenset({0})
+    # Names, not indices, and the order they are named in does not matter.
+    assert parse_tiers("other_unreviewed, human_reviewed") == frozenset({0, 3})
+    for bad in ("", "human_only", "any", "0,2"):
+        try:
+            parse_tiers(bad)
+        except Exception as exc:
+            assert "valid names are" in str(exc) or "name at least one of" in str(exc), str(exc)
+        else:
+            raise AssertionError(f"--tiers {bad!r} should have been rejected")
+
+    # Reviewed outranks human: a curated mouse domain sorts above an auto-annotated
+    # human one.
+    assert tier_of("9606", True) == 0
+    assert tier_of("10090", True) == 1
+    assert tier_of("9606", False) == 2
+    assert tier_of("10090", False) == 3
 
     with tempfile.TemporaryDirectory() as tmp:
         _regions, dat, _clans, _families = write_fixtures(tmp)
         with gzip.open(dat, "rb") as fh:
             everything = parse_uniprot_dat(fh)
         assert set(everything) == set(PROTEINS), sorted(everything)
-        assert everything["P11111"][0] == "9606"
-        assert everything["P11111"][1] == PROTEINS["P11111"][1]
+        assert everything["P11111"] == ("9606", PROTEINS["P11111"][2], True)
+        assert everything["U77777"][2] is False, everything["U77777"]
         with gzip.open(dat, "rb") as fh:
             human = parse_uniprot_dat(fh, {"9606"})
-        assert set(human) == {a for a, (t, _s) in PROTEINS.items() if t == "9606"}, sorted(human)
+        assert set(human) == {a for a, (t, _r, _s) in PROTEINS.items() if t == "9606"}, sorted(human)
         assert "Q44444" not in human and "Q55555" not in human, sorted(human)
+
+        # An ID line with neither token is fatal, not False. A silently mis-parsed
+        # flag would file every TrEMBL protein in the human_reviewed stratum.
+        broken = "ID   X99999_TEST   393 AA.\nAC   X99999;\nOX   NCBI_TaxID=9606;\nSQ   SEQUENCE\n     MMMM\n//\n"
+        try:
+            parse_uniprot_dat(io.StringIO(broken))
+        except RuntimeError as exc:
+            assert "Reviewed;" in str(exc), str(exc)
+        else:
+            raise AssertionError("an ID line without a review token should be fatal")
+
+        # First writer wins, which is what lets Swiss-Prot be layered under TrEMBL.
+        merged = {}
+        with gzip.open(dat, "rb") as fh:
+            parse_uniprot_dat(fh, None, merged)
+        promoted = write_dat(os.path.join(tmp, "promoted.dat.gz"), {"U77777": ("9606", True, "D" * 40)})
+        with gzip.open(promoted, "rb") as fh:
+            parse_uniprot_dat(fh, None, merged)
+        assert merged["U77777"][2] is False, merged["U77777"]
+
+        # A file that contributes nothing is a configuration error, not a shrug:
+        # wrong file or wrong taxon filter, and both look like a smaller-but-fine run.
+        try:
+            load_universe([dat, dat])
+        except RuntimeError as exc:
+            assert "contributed no proteins" in str(exc), str(exc)
+        else:
+            raise AssertionError("a zero-contribution --uniprot-dat should be fatal")
+
+        # The step-9 guard, at unit level: an eligible stratum the universe cannot
+        # hold fails before the regions pass rather than quietly keeping fewer
+        # families.
+        reviewed_only = {a: (t, s, r) for a, (t, r, s) in PROTEINS.items() if r}
+        check_universe_covers(parse_tiers("human_reviewed,other_reviewed"), reviewed_only, ["x.dat.gz"])
+        for tiers, word in (("human_reviewed,human_unreviewed", "unreviewed"), ("other_reviewed", "non-human")):
+            universe = reviewed_only if word == "unreviewed" else {
+                a: (t, s, r) for a, (t, r, s) in PROTEINS.items() if t == "9606"
+            }
+            try:
+                check_universe_covers(parse_tiers(tiers), universe, ["x.dat.gz"])
+            except RuntimeError as exc:
+                assert word in str(exc), str(exc)
+            else:
+                raise AssertionError(f"--tiers {tiers} should not survive that universe")
 
 
 def test_formats_and_coordinates():
     with tempfile.TemporaryDirectory() as tmp:
-        out, log = run(tmp, "any")
+        out, log = run(tmp, ALL_TIERS)
 
         rows = read_instances(out)
         with open(os.path.join(out, "instances.tsv"), newline="") as fh:
@@ -193,7 +308,7 @@ def test_formats_and_coordinates():
         # instance_id is {family}_{accession}_{ali_start}_{ali_end} ...
         assert "PF00001_P11111_11_19" in by_id, sorted(by_id)
         # ... and the sequence is the 1-based inclusive slice of the parent.
-        parent = PROTEINS["P11111"][1]
+        parent = PROTEINS["P11111"][2]
         seqs = read_fasta(out)
         assert seqs["PF00001_P11111_11_19"] == parent[10:19]
         assert len(seqs["PF00001_P11111_11_19"]) == 9
@@ -207,8 +322,15 @@ def test_formats_and_coordinates():
         # MAKE_METIS contracts the graph on this column.
         assert by_id["PF00002_P33333_2_11"]["clan"] == "CL_PF00002"
 
-        # The mouse-only family survives under `any`, via tier 2.
+        # source_db is the record's own flag now, not a constant: an unreviewed
+        # parent must say so, because domainsplit stores it as protein.reviewed.
+        assert by_id["PF00007_U77777_3_14"]["source_db"] == "unreviewed"
+        assert {r["source_db"] for r in rows} == {"reviewed", "unreviewed"}
+
+        # The mouse-only family survives the full tier set, via other_reviewed.
         assert any(r["family"] == "PF00003" for r in rows), sorted(by_id)
+        # ... and the non-human unreviewed one via the bottom stratum.
+        assert any(r["family"] == "PF00008" for r in rows), sorted(by_id)
 
         # Every FASTA key is an instance id and every instance has a sequence.
         assert set(seqs) == set(by_id), (sorted(set(seqs) ^ set(by_id)))
@@ -224,8 +346,7 @@ def test_formats_and_coordinates():
         # dropped_families.tsv is always written and its reasons are load-bearing
         # downstream. PF00009's only parent is outside the universe; PF00004's only
         # region is out of range.
-        with open(os.path.join(out, "dropped_families.tsv"), newline="") as fh:
-            dropped = {r["family"]: r["reason"] for r in csv.DictReader(fh, delimiter="\t")}
+        dropped = read_dropped(out)
         assert set(dropped) == {"PF00004", "PF00009"}, dropped
         assert set(dropped.values()) == {"no_eligible_instances"}, dropped
 
@@ -239,29 +360,96 @@ def test_formats_and_coordinates():
         assert "coordinates fall outside" in log, log
 
 
-def test_human_only_is_a_subset_and_keeps_the_same_human_instances():
+def test_reviewed_outranks_human_when_filling():
     with tempfile.TemporaryDirectory() as tmp:
-        any_out, _ = run(tmp, "any")
-        human_out, human_log = run(tmp, "human_only")
+        # PF00006 has one mouse-reviewed candidate and one human-unreviewed one, and
+        # room for exactly one. The curated non-human sequence must win: that is the
+        # whole point of tier 1 sitting above tier 2.
+        out, _ = run(tmp, ALL_TIERS, pool_size=1)
+        picked = [r for r in read_instances(out) if r["family"] == "PF00006"]
+        assert [r["protein_id"] for r in picked] == ["Q66666"], picked
+        assert picked[0]["source_db"] == "reviewed"
 
-        any_rows = read_instances(any_out)
-        any_ids = {r["instance_id"] for r in any_rows}
-        human_ids = {r["instance_id"] for r in read_instances(human_out)}
+        # And the cascade fills *freely* rather than as a top-up: with room for two,
+        # a non-empty tier 1 does not stop tier 2 from contributing.
+        out, _ = run(tmp, ALL_TIERS, pool_size=2, out_name="pool2")
+        parents = sorted(r["protein_id"] for r in read_instances(out) if r["family"] == "PF00006")
+        assert parents == ["Q66666", "U77777"], parents
 
-        assert human_ids < any_ids, sorted(human_ids - any_ids)
-        # The invariant that matters, and it is stronger than "subset": the human
-        # instances a family keeps are byte-identical between the two tiers. Only
-        # the non-human ones disappear -- both Q44444's PF00002 region, whose family
-        # survives on its human sibling, and all of mouse-only PF00003.
-        assert human_ids == {r["instance_id"] for r in any_rows if r["taxon_id"] == "9606"}
-        assert all(r["taxon_id"] == "9606" for r in read_instances(human_out))
 
-        # A family with only non-human regions is dropped rather than filled from
-        # a non-human stratum -- that is what human_only means.
-        with open(os.path.join(human_out, "dropped_families.tsv"), newline="") as fh:
-            dropped = {r["family"]: r["reason"] for r in csv.DictReader(fh, delimiter="\t")}
-        assert dropped["PF00003"] == "no_eligible_instances", dropped
+def test_human_reviewed_is_a_subset_and_keeps_the_same_instances():
+    with tempfile.TemporaryDirectory() as tmp:
+        all_out, _ = run(tmp, ALL_TIERS)
+        human_out, human_log = run(tmp, "human_reviewed")
+
+        all_rows = read_instances(all_out)
+        all_ids = {r["instance_id"] for r in all_rows}
+        human_rows = read_instances(human_out)
+        human_ids = {r["instance_id"] for r in human_rows}
+
+        assert human_ids < all_ids, sorted(human_ids - all_ids)
+        # The invariant that matters, and it is stronger than "subset": the
+        # human-reviewed instances a family keeps are byte-identical between the two
+        # tier sets. Only the other three strata disappear -- Q44444's PF00002
+        # region, whose family survives on its human sibling, all of mouse-only
+        # PF00003, and the two unreviewed families.
+        assert human_ids == {r["instance_id"] for r in all_rows if r["taxon_id"] == "9606" and r["source_db"] == "reviewed"}
+        assert {r["protein_id"] for r in human_rows} <= HUMAN_REVIEWED
+        assert all(r["source_db"] == "reviewed" for r in human_rows)
+
+        # A family with nothing in a named stratum is dropped rather than filled
+        # from an unnamed one -- that is what --tiers means.
+        dropped = read_dropped(human_out)
+        for family in ("PF00003", "PF00006", "PF00007", "PF00008"):
+            assert dropped[family] == "no_eligible_instances", dropped
         assert "9606" in human_log, human_log
+
+
+def test_several_flat_files_merge_first_writer_first():
+    with tempfile.TemporaryDirectory() as tmp:
+        _regions, dat, _clans, _families = write_fixtures(tmp)
+        # A TrEMBL accession promoted to Swiss-Prot between releases exists in both
+        # files. Listed first, the curated record wins and PF00007 becomes eligible
+        # for a human-reviewed run; listed second it does not, and the file adds
+        # nothing at all, which is itself fatal.
+        promoted = write_dat(
+            os.path.join(tmp, "promoted.dat.gz"),
+            {"U77777": ("9606", True, "D" * 40), "X12345": ("9606", True, "Y" * 40)},
+        )
+
+        out, _ = run(tmp, "human_reviewed", dats=[promoted, dat], out_name="promoted_first")
+        rows = {r["family"]: r for r in read_instances(out)}
+        assert "PF00007" in rows, sorted(rows)
+        assert rows["PF00007"]["source_db"] == "reviewed", rows["PF00007"]
+
+        _out, proc = run(tmp, "human_reviewed", dats=[dat, dat], check=False, out_name="dupe")
+        assert proc.returncode != 0
+        assert "contributed no proteins" in proc.stderr, proc.stderr
+
+
+def test_a_tier_set_the_universe_cannot_fill_is_fatal():
+    with tempfile.TemporaryDirectory() as tmp:
+        reviewed_only = write_dat(
+            os.path.join(tmp, "reviewed_only.dat.gz"),
+            {a: v for a, v in PROTEINS.items() if v[1]},
+        )
+        human_only = write_dat(
+            os.path.join(tmp, "human_only.dat.gz"),
+            {a: v for a, v in PROTEINS.items() if v[0] == "9606"},
+        )
+
+        _out, proc = run(tmp, "human_reviewed,human_unreviewed", dats=[reviewed_only], check=False, out_name="g1")
+        assert proc.returncode != 0
+        assert "human_unreviewed" in proc.stderr and "are unreviewed" in proc.stderr, proc.stderr
+
+        _out, proc = run(tmp, "human_reviewed,other_reviewed", dats=[human_only], check=False, out_name="g2")
+        assert proc.returncode != 0
+        assert "other_reviewed" in proc.stderr and "are non-human" in proc.stderr, proc.stderr
+
+        # An unknown stratum name is rejected by argparse, listing the valid ones.
+        _out, proc = run(tmp, "human_only", check=False, out_name="g3")
+        assert proc.returncode != 0
+        assert "valid names are" in proc.stderr and "other_unreviewed" in proc.stderr, proc.stderr
 
 
 def test_filling_prefers_distinct_parent_proteins():
@@ -269,7 +457,7 @@ def test_filling_prefers_distinct_parent_proteins():
         # Room for two of PF00001's three regions. P11111 owns two of them, so a
         # uniform draw would sometimes take both and leave one parent; the
         # round-robin must take one from each parent instead.
-        out, _ = run(tmp, "any", pool_size=2)
+        out, _ = run(tmp, ALL_TIERS, pool_size=2)
         parents = [r["protein_id"] for r in read_instances(out) if r["family"] == "PF00001"]
         assert len(parents) == 2, parents
         assert len(set(parents)) == 2, parents
@@ -278,7 +466,7 @@ def test_filling_prefers_distinct_parent_proteins():
 def test_a_repeat_domain_family_is_not_filled_from_one_protein():
     with tempfile.TemporaryDirectory() as tmp:
         # pool_size 25 -> cap 5. P77777 carries ten PF00005 regions, P88888 one.
-        out, log = run(tmp, "any", pool_size=25)
+        out, log = run(tmp, ALL_TIERS, pool_size=25)
         rows = [r for r in read_instances(out) if r["family"] == "PF00005"]
         parents = Counter(r["protein_id"] for r in rows)
         assert parents["P77777"] == 5, parents
@@ -287,7 +475,7 @@ def test_a_repeat_domain_family_is_not_filled_from_one_protein():
 
         # And the cap scales with pool_size rather than being a constant: at
         # pool_size 5 the cap is 1, so the family reduces to one region per parent.
-        out, _ = run(tmp, "any", pool_size=5)
+        out, _ = run(tmp, ALL_TIERS, pool_size=5, out_name="cap5")
         rows = [r for r in read_instances(out) if r["family"] == "PF00005"]
         parents = Counter(r["protein_id"] for r in rows)
         assert parents == {"P77777": 1, "P88888": 1}, parents
@@ -296,7 +484,10 @@ def test_a_repeat_domain_family_is_not_filled_from_one_protein():
 if __name__ == "__main__":
     test_unit_helpers()
     test_formats_and_coordinates()
-    test_human_only_is_a_subset_and_keeps_the_same_human_instances()
+    test_reviewed_outranks_human_when_filling()
+    test_human_reviewed_is_a_subset_and_keeps_the_same_instances()
+    test_several_flat_files_merge_first_writer_first()
+    test_a_tier_set_the_universe_cannot_fill_is_fatal()
     test_filling_prefers_distinct_parent_proteins()
     test_a_repeat_domain_family_is_not_filled_from_one_protein()
     print("ok: regions-based sampling satisfies the output contract")
