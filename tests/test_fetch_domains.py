@@ -26,6 +26,10 @@ What is asserted here is the part that can silently drift:
 * the subset invariant: a family's human-reviewed instances under the full tier
   set are exactly the ones it keeps under ``--tiers human_reviewed``;
 * that a region whose parent is outside the universe is skipped, not guessed at;
+* the primary-accession invariant: only an entry's first accession is indexed, a
+  region naming a secondary (demoted) accession is dropped and counted apart from
+  a parent the flat files never had, and a family that loses *every* region that
+  way is reported ``demoted_accession`` rather than ``no_eligible_instances``;
 * that filling a family prefers distinct parent proteins, which is the quantity
   SELECT_EXAMPLES and an external test set are short of.
 
@@ -74,7 +78,10 @@ REGIONS_HEADER = [
 # so human_reviewed must drop it with no_eligible_instances rather than fall back.
 # PF00006: mouse-reviewed against human-unreviewed, which is the fill-order test.
 # PF00007: human but unreviewed only. PF00008: non-human and unreviewed only.
-# PF00009: a region whose parent is not in the DAT at all.
+# PF00009: a region whose parent is not in the DAT at all. PF00010: every region
+# names a secondary accession, so it is the demoted_accession case -- and its
+# contrast with PF00009 is the point, one parent is unknown and the other is known
+# under a name UniProt has retired.
 REGIONS = [
     ("P11111", "PF00001", 10, 20, 11, 19),
     ("P11111", "PF00001", 50, 62, 51, 60),
@@ -87,6 +94,12 @@ REGIONS = [
     ("U77777", "PF00007", 3, 15, 3, 14),
     ("U88888", "PF00008", 1, 12, 1, 11),
     ("P99999", "PF00009", 1, 10, 1, 10),   # P99999 absent from the DAT
+    # Secondary accessions of P11111 (same AC line, then a later one). PF00001 also
+    # has primary-accession regions, so the family itself must be unaffected.
+    ("S11111", "PF00001", 30, 40, 31, 39),
+    ("S11112", "PF00001", 60, 70, 61, 69),
+    # PF00010 has nothing else, so the family drops with the new reason.
+    ("S33333", "PF00010", 1, 12, 2, 11),
     ("P66666", "PF00004", 900, 999, 901, 990),  # coordinates past the sequence end
 ] + [
     # PF00005 is the repeat-domain shape that motivates the per-parent cap: one
@@ -114,20 +127,34 @@ PROTEINS = {
     "P88888": ("9606", True, "S" * 40),
 }
 
+# accession -> its secondary accessions, i.e. names UniProt has demoted into this
+# entry. P11111 carries two, which is what makes "everything after the first
+# accession of the first AC line" testable on a later AC line as well.
+SECONDARY = {
+    "P11111": ["S11111", "S11112"],
+    "P33333": ["S33333"],
+}
+
 FAMILIES = [
     "PF00001", "PF00002", "PF00003", "PF00004", "PF00005",
-    "PF00006", "PF00007", "PF00008", "PF00009",
+    "PF00006", "PF00007", "PF00008", "PF00009", "PF00010",
 ]
 
 # What a *human-only* --tiers run may keep, whatever else changes around it.
 HUMAN_REVIEWED = {acc for acc, (taxon, reviewed, _s) in PROTEINS.items() if taxon == "9606" and reviewed}
 
 
-def dat_entry(acc, taxon, reviewed, seq):
+def dat_entry(acc, taxon, reviewed, seq, secondaries=()):
     out = io.StringIO()
     status = "Reviewed;" if reviewed else "Unreviewed;"
     out.write(f"ID   {acc}_TEST   {status}   {len(seq)} AA.\n")
-    out.write(f"AC   {acc};\n")
+    # UniProt wraps a long accession list over several AC lines, and every
+    # accession after the very first one is a secondary of this entry -- so the
+    # first secondary goes on the primary's own line and the rest on a later one.
+    first = "; ".join([acc] + list(secondaries[:1]))
+    out.write(f"AC   {first};\n")
+    if len(secondaries) > 1:
+        out.write("AC   " + "; ".join(secondaries[1:]) + ";\n")
     out.write(f"OX   NCBI_TaxID={taxon};\n")
     out.write(f"SQ   SEQUENCE   {len(seq)} AA;  0 MW;  0 CRC64;\n")
     for i in range(0, len(seq), 60):
@@ -136,10 +163,11 @@ def dat_entry(acc, taxon, reviewed, seq):
     return out.getvalue()
 
 
-def write_dat(path, entries):
+def write_dat(path, entries, secondary=None):
+    secondary = SECONDARY if secondary is None else secondary
     with gzip.open(path, "wt") as fh:
         for acc, (taxon, reviewed, seq) in entries.items():
-            fh.write(dat_entry(acc, taxon, reviewed, seq))
+            fh.write(dat_entry(acc, taxon, reviewed, seq, secondary.get(acc, ())))
     return path
 
 
@@ -245,6 +273,23 @@ def test_unit_helpers():
         assert set(everything) == set(PROTEINS), sorted(everything)
         assert everything["P11111"] == ("9606", PROTEINS["P11111"][2], True)
         assert everything["U77777"][2] is False, everything["U77777"]
+        # Primary accessions only, and the secondaries come back as a membership
+        # set: one entry's later accessions are names UniProt has retired, and an
+        # instance keyed on one of them is a protein nothing downstream can resolve.
+        seen_secondary = set()
+        with gzip.open(dat, "rb") as fh:
+            primaries = parse_uniprot_dat(fh, None, None, seen_secondary)
+        assert set(primaries) == set(PROTEINS), sorted(primaries)
+        assert seen_secondary == {"S11111", "S11112", "S33333"}, sorted(seen_secondary)
+        assert not (seen_secondary & set(primaries)), sorted(seen_secondary & set(primaries))
+
+        # The taxon filter applies to the secondaries too -- they are only ever
+        # compared against a region whose parent the universe rejected.
+        mouse_only = set()
+        with gzip.open(dat, "rb") as fh:
+            parse_uniprot_dat(fh, {"10090"}, None, mouse_only)
+        assert mouse_only == set(), sorted(mouse_only)
+
         with gzip.open(dat, "rb") as fh:
             human = parse_uniprot_dat(fh, {"9606"})
         assert set(human) == {a for a, (t, _r, _s) in PROTEINS.items() if t == "9606"}, sorted(human)
@@ -347,8 +392,21 @@ def test_formats_and_coordinates():
         # downstream. PF00009's only parent is outside the universe; PF00004's only
         # region is out of range.
         dropped = read_dropped(out)
-        assert set(dropped) == {"PF00004", "PF00009"}, dropped
-        assert set(dropped.values()) == {"no_eligible_instances"}, dropped
+        assert set(dropped) == {"PF00004", "PF00009", "PF00010"}, dropped
+        assert dropped["PF00004"] == "no_eligible_instances", dropped
+        # PF00009's parent is unknown to the flat files; PF00010's is known, under a
+        # primary accession this region's name was demoted into. Different facts, and
+        # only the second one is a region genuinely lost to a release skew -- reported
+        # as itself rather than blamed on --tiers, which did nothing here.
+        assert dropped["PF00009"] == "no_eligible_instances", dropped
+        assert dropped["PF00010"] == "demoted_accession", dropped
+
+        # No accession that leaves this script is a secondary accession, and a family
+        # that still has primary-accession regions is untouched by the ones that are.
+        secondaries = {s for accs in SECONDARY.values() for s in accs}
+        assert not ({r["protein_id"] for r in rows} & secondaries), rows
+        assert not any(s in i for i in by_id for s in secondaries), sorted(by_id)
+        assert {r["protein_id"] for r in rows if r["family"] == "PF00001"} == {"P11111", "P22222"}
 
         # go_annotations.tsv exists and is header-only: SUBSET_DOMAIN_DATA requires
         # the file, DDI mode has no family-level GO to put in it.
@@ -358,6 +416,10 @@ def test_formats_and_coordinates():
 
         assert "region rows skipped" in log, log
         assert "coordinates fall outside" in log, log
+        # The demoted count is on stderr next to the not_in_universe one, so it is
+        # visible in .command.err without opening the TSV.
+        assert "secondary" in log and "demoted" in log, log
+        assert "primary accession each" in log, log
 
 
 def test_reviewed_outranks_human_when_filling():
@@ -402,6 +464,9 @@ def test_human_reviewed_is_a_subset_and_keeps_the_same_instances():
         dropped = read_dropped(human_out)
         for family in ("PF00003", "PF00006", "PF00007", "PF00008"):
             assert dropped[family] == "no_eligible_instances", dropped
+        # ... and the demoted case is not one of them: P33333 is human and reviewed,
+        # so --tiers is not what cost PF00010 its only region.
+        assert dropped["PF00010"] == "demoted_accession", dropped
         assert "9606" in human_log, human_log
 
 

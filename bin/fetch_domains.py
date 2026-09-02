@@ -15,9 +15,10 @@ full 30,134-family set would be ~242 sequential hours against a public service.
     Pfam-A.regions.tsv.gz every Pfam region of every reference-proteome protein:
                           family, parent accession and the alignment coordinates
     uniprot_sprot.dat.gz  a UniProt flat file: parent sequence (SQ), taxon (OX)
-                          and the review flag (ID) per accession. Repeatable --
-                          list Swiss-Prot first and a TrEMBL file after it, which
-                          is what makes the unreviewed strata fillable at all
+                          and the review flag (ID) per entry, indexed under that
+                          entry's primary accession only. Repeatable -- list
+                          Swiss-Prot first and a TrEMBL file after it, which is
+                          what makes the unreviewed strata fillable at all
     Pfam-A.clans.tsv.gz   family -> clan; a blank clan column means singleton
 
 **Why regions and not Pfam-A.fasta.** Pfam-A.fasta is "90 % non-redundant" (Pfam's
@@ -33,6 +34,25 @@ file joins it here: the domain is cut as sequence[ali_start-1:ali_end].
 Coordinates are the *alignment* region (ali_start/ali_end), not the envelope
 (seq_start/seq_end) -- the same region Pfam-A.fasta's deflines carried, so
 instance ids stay comparable with what earlier releases of this script produced.
+
+**Primary accessions only.** Every accession this script writes -- the
+protein_id column of instances.tsv, the parent inside every instance id, the
+species.tsv rows -- is a UniProt *primary* accession: the first accession on an
+entry's first AC line. A region whose pfamseq_acc has since been demoted to a
+secondary accession is dropped and counted, never rewritten to the primary that
+absorbed it. Pfam's coordinates are offsets into the sequence Pfam had for the
+demoted accession and the absorbing entry may carry a different one, so
+canonicalising the key would keep the region while silently shifting the domain
+boundaries -- and those boundaries are what gets cut, embedded and published.
+Dropping the region is the honest outcome, and it is reported per family
+(reason `demoted_accession`) and as a region count on stderr.
+
+The invariant is load-bearing outside this repo: daisybio/domainsplit ingests
+instances.tsv, makes one `protein` row per protein_id and enriches it from these
+same flat files, whose parser emits one record per primary accession and resolves
+no secondaries. A secondary accession leaving here is a protein with no sequence,
+no GO terms and no STRING id there -- caught, eventually, by that pipeline's
+INSERT_PROTEIN_SEQUENCES guard.
 
 Instance ids use '_' as the separator, never '|':
 
@@ -147,6 +167,7 @@ DEFAULT_TIERS = ("human_reviewed",)
 DROPPED_FAMILIES_COLUMNS = ("family", "reason")
 DROP_REASONS = {
     "no_eligible_instances": "have Pfam records but none in a stratum --tiers names",
+    "demoted_accession": "have Pfam records, but every one names an accession UniProt has demoted to secondary",
     "dead": "are dead in Pfam",
     "not_in_pfam": "have no regions in Pfam-A.regions and are not listed as dead",
 }
@@ -234,8 +255,8 @@ def parse_clans(text):
     return clans
 
 
-def parse_uniprot_dat(stream, taxa=None, into=None):
-    """Fill {accession: (taxon_id, sequence, reviewed)} from a UniProt flat-file stream.
+def parse_uniprot_dat(stream, taxa=None, into=None, secondary=None):
+    """Fill {primary accession: (taxon_id, sequence, reviewed)} from a UniProt flat-file stream.
 
     This is the whole protein universe: Pfam-A.regions gives coordinates and
     nothing else, so sequence, taxon *and* the review flag all come from here.
@@ -260,10 +281,24 @@ def parse_uniprot_dat(stream, taxa=None, into=None):
     duplicate accession, which is what lets load_universe() layer several files
     (Swiss-Prot first) without the outcome depending on dict-update order.
 
-    Every accession of an entry is indexed, not only the primary one: Pfam's
-    pfamseq_acc follows UniProt's primary accession, but an accession demoted to
-    secondary between the two releases would otherwise silently lose all of its
-    regions.
+    Only the entry's **primary** accession is indexed -- the first accession of
+    the first AC line; everything after it, on that line or any later AC line, is
+    a secondary accession of the same entry. Indexing the secondaries too would
+    keep the regions of an accession demoted between the Pfam and UniProt
+    releases, which is why this function used to do it, and that is the bug: the
+    instance then leaves the pipeline keyed on a name nothing downstream resolves
+    (see the module docstring). A region on a demoted accession is dropped, and
+    canonicalising it to the absorbing entry is not an option either -- Pfam's
+    coordinates belong to the sequence it had for the demoted accession.
+
+    `secondary`, when given, is a set filled with the secondary accessions seen,
+    subject to the same `taxa` filter as the universe. Membership only, no values:
+    it exists so sample_instances can tell a region whose parent is *absent from
+    the flat files* from one whose parent is *present but demoted*, and only the
+    second is worth reporting. Roughly 0.57 extra short strings per entry (a
+    25 MB sample of uniprot_sprot.dat.gz carries 25,973 accessions over 16,554
+    entries), so ~330 k under all-species Swiss-Prot -- tens of MB against a
+    universe that already holds every sequence.
     """
     universe = {} if into is None else into
     accessions, taxon, seq_parts, in_seq, reviewed = [], "", [], False, None
@@ -278,8 +313,9 @@ def parse_uniprot_dat(stream, taxa=None, into=None):
             )
         if taxon and (taxa is None or taxon in taxa):
             sequence = "".join(seq_parts)
-            for acc in accessions:
-                universe.setdefault(acc, (taxon, sequence, reviewed))
+            universe.setdefault(accessions[0], (taxon, sequence, reviewed))
+            if secondary is not None:
+                secondary.update(accessions[1:])
 
     for raw in stream:
         line = raw.decode("ascii", "replace") if isinstance(raw, bytes) else raw
@@ -310,21 +346,32 @@ def parse_uniprot_dat(stream, taxa=None, into=None):
 def load_universe(paths, taxa=None):
     """Parse every --uniprot-dat into one universe; the first file to carry an accession wins.
 
+    Returns (universe, secondary): {primary accession: (taxon, sequence, reviewed)}
+    and the set of secondary accessions the same entries carried, which is
+    accounting only -- see parse_uniprot_dat.
+
     Swiss-Prot must therefore be listed first: an accession promoted from TrEMBL
     between releases exists in both files, the curated record is the right one,
     and which one lands must not come down to dict-update order by accident.
 
     A file that contributes nothing after the taxon filter is fatal rather than
     logged. It is the wrong file or the wrong filter, and either one looks exactly
-    like a successful run with fewer families several steps downstream.
+    like a successful run with fewer families several steps downstream. The guard
+    is on the primary-accession count, which is one per entry -- so the number this
+    prints is entries, not accessions: ~573 k for all-species Swiss-Prot, where the
+    all-accessions count it printed before the primary-only rule was ~900 k.
     """
-    universe = {}
+    universe, secondary = {}, set()
     for path in paths:
-        before = len(universe)
+        before, sec_before = len(universe), len(secondary)
         with open(path, "rb") as fh:
-            parse_uniprot_dat(iter_gzip_lines(fh), taxa, universe)
+            parse_uniprot_dat(iter_gzip_lines(fh), taxa, universe, secondary)
         added = len(universe) - before
-        print(f"  {path}: {added:,} accessions", file=sys.stderr)
+        print(
+            f"  {path}: {added:,} entries (one primary accession each), "
+            f"{len(secondary) - sec_before:,} secondary accessions noted",
+            file=sys.stderr,
+        )
         if not added:
             raise RuntimeError(
                 f"{path} contributed no proteins to the universe"
@@ -335,7 +382,7 @@ def load_universe(paths, taxa=None):
                     else " -- every region would be dropped as not_in_universe"
                 )
             )
-    return universe
+    return universe, secondary
 
 
 def eligible_taxa(eligible):
@@ -464,8 +511,8 @@ def tier_of(taxon_id, reviewed):
 # ---------------------------------------------------------------------------
 
 
-def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
-    """One pass over Pfam-A.regions.tsv, returning ({family: [record]}, stats, seen_families).
+def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, secondary=None):
+    """One pass over Pfam-A.regions.tsv, returning ({family: [record]}, stats, seen, family_stats).
 
     A record is a dict with instance_id, family, protein_id, taxon_id, start, end,
     tier and sequence. `eligible` is a set of tier indices (see TIERS and --tiers);
@@ -478,11 +525,24 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
     offered per (family, tier), so a family is spread over parents rather than
     filled from whichever protein happens to carry the most copies of the domain.
 
-    `universe` is {accession: (taxon_id, sequence, reviewed)} from parse_uniprot_dat.
-    A region whose protein is absent from it is counted and skipped -- at full scale
-    that is most of the file, because Pfam covers every reference proteome while the
-    universe is only whatever flat files were passed. The review flag rides on the
-    record, so the tier lookup needs no second table.
+    `universe` is {primary accession: (taxon_id, sequence, reviewed)} from
+    parse_uniprot_dat. A region whose protein is absent from it is counted and
+    skipped -- at full scale that is most of the file, because Pfam covers every
+    reference proteome while the universe is only whatever flat files were passed.
+    The review flag rides on the record, so the tier lookup needs no second table.
+
+    `secondary` is that parse's secondary-accession set, and it splits that miss in
+    two: a parent the flat files do not know at all (`not_in_universe`, expected and
+    uninteresting) against one they know as a demoted accession
+    (`demoted_accession`, a region genuinely lost to a release skew). Only the second
+    is worth reporting, which is why the two are counted apart -- both globally and
+    per family, in `family_stats`.
+
+    `family_stats` is {"demoted": Counter, "eligible_tier": Counter} keyed by family.
+    classify_dropped needs both: `seen_families` is populated *before* the universe
+    lookup, so a family whose every region names a demoted accession would otherwise
+    be reported as `no_eligible_instances` -- blaming --tiers for something --tiers
+    did not do.
 
     Unlike the Pfam-A.fasta pass this replaces, a record is complete at its own row:
     the sequence is sliced out of the parent rather than accumulated over following
@@ -506,6 +566,7 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
     parent_cap = max(1, pool_size // PARENT_CAP_DIVISOR)
     parent_offers = defaultdict(Counter)
     stats = Counter()
+    family_stats = {"demoted": Counter(), "eligible_tier": Counter()}
     seen_families = set()
     last_family = None
     columns = None
@@ -546,7 +607,13 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
         accession = fields[columns[REGIONS_PROTEIN_COL]].strip()
         entry = universe.get(accession)
         if entry is None:
-            stats["not_in_universe"] += 1
+            # Absent from the flat files, or present in them under a primary
+            # accession this one was demoted to? Only the second is a loss.
+            if secondary and accession in secondary:
+                stats["demoted_accession"] += 1
+                family_stats["demoted"][family] += 1
+            else:
+                stats["not_in_universe"] += 1
             continue
         taxon_id, parent, reviewed = entry
 
@@ -555,6 +622,7 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
         if tier not in eligible:
             stats["ineligible_tier_records"] += 1
             continue
+        family_stats["eligible_tier"][family] += 1
 
         key = (family, tier)
         # Bound one parent's share before the reservoir sees the row -- see
@@ -651,7 +719,7 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None):
             for rec in by_family[family]:
                 stats[f"tier_{TIERS[rec['tier']]}_kept"] += 1
 
-    return by_family, stats, seen_families
+    return by_family, stats, seen_families, family_stats
 
 
 def _spread_over_parents(rng, records, room):
@@ -716,19 +784,30 @@ def write_instances_tsv(path, by_family, clans):
                 )
 
 
-def classify_dropped(families, by_family, seen_families, dead):
+def classify_dropped(families, by_family, seen_families, dead, family_stats):
     """Return [(family, reason)] for every requested family that kept no instance.
 
-    Three distinct causes, and conflating them would hide the one that is a
+    Four distinct causes, and conflating them would hide the one that is a
     configuration choice rather than a fact about Pfam: a family absent from the
     stream is dead or mistyped, while a family *present* in the stream with
     nothing in an eligible tier is --tiers doing exactly what it was asked to.
+
+    `demoted_accession` takes precedence over `no_eligible_instances`, and that
+    ordering is the whole reason `family_stats` is threaded in here. A family
+    reaches `seen_families` on its family column alone, before the universe lookup
+    runs, so one whose every region names an accession UniProt has demoted looks
+    exactly like a --tiers drop -- and --tiers had nothing to do with it. The
+    narrower claim is the one to make: the family lost regions to a release skew
+    *and* no region of it ever reached an eligible tier.
     """
+    demoted, eligible = family_stats["demoted"], family_stats["eligible_tier"]
     dropped = []
     for family in sorted(families):
         if family in by_family:
             continue
-        if family in seen_families:
+        if demoted.get(family) and not eligible.get(family):
+            dropped.append((family, "demoted_accession"))
+        elif family in seen_families:
             dropped.append((family, "no_eligible_instances"))
         elif family in dead:
             dropped.append((family, "dead"))
@@ -847,7 +926,9 @@ def derived_key(release, families, pool_size, seed, universe_digest, tiers):
     at the same --seed against the same Pfam release. Digesting its accession set
     also settles the Cache's pinning: the DAT is filed under pfam-{release}/, where
     the release string alone would let two machines with differently-aged copies
-    disagree silently under one key.
+    disagree silently under one key. That set is the *primary* accessions, one per
+    entry, so it moved once when the primary-only rule landed -- every pre-existing
+    entry is cold, correctly: the universe genuinely changed.
     """
     payload = "|".join(
         [
@@ -984,7 +1065,7 @@ def main():
     print(f"Reading the protein universe from {len(dat_paths)} flat file(s)...", file=sys.stderr)
     # load_universe() has already failed on any file that added nothing, so the
     # universe cannot be empty here.
-    universe = load_universe(dat_paths, taxa_filter)
+    universe, secondary = load_universe(dat_paths, taxa_filter)
     # Before the 4.7 GB pass, not after it: a stratum the universe cannot serve is
     # otherwise indistinguishable from a run that simply kept fewer families.
     check_universe_covers(eligible, universe, dat_paths)
@@ -1029,14 +1110,14 @@ def main():
         if regions_path:
             print(f"Streaming {regions_path}...", file=sys.stderr)
             with open(regions_path, "rb") as fh:
-                by_family, stats, seen = sample_instances(
-                    iter_gzip_lines(fh), wanted, args.pool_size, universe, args.seed, eligible
+                by_family, stats, seen, family_stats = sample_instances(
+                    iter_gzip_lines(fh), wanted, args.pool_size, universe, args.seed, eligible, secondary
                 )
         else:
             print(f"Streaming {PFAM_REGIONS_URL} (~4.7 GB gz)...", file=sys.stderr)
             with _open_url(PFAM_REGIONS_URL, timeout=600) as resp:
-                by_family, stats, seen = sample_instances(
-                    iter_gzip_lines(resp), wanted, args.pool_size, universe, args.seed, eligible
+                by_family, stats, seen, family_stats = sample_instances(
+                    iter_gzip_lines(resp), wanted, args.pool_size, universe, args.seed, eligible, secondary
                 )
 
         write_instances_tsv(instances_out, by_family, clans)
@@ -1047,7 +1128,7 @@ def main():
         # the happy path still makes no extra request.
         absent = [f for f in families if f not in by_family and f not in seen]
         dead = parse_dead(cache.text("Pfam-A.dead", PFAM_DEAD_URL, gzipped=True)) if absent else set()
-        dropped = classify_dropped(families, by_family, seen, dead)
+        dropped = classify_dropped(families, by_family, seen, dead, family_stats)
         write_dropped_families(dropped_out, dropped)
 
         if cached_instances:
@@ -1087,6 +1168,13 @@ def main():
             print(
                 f"  {stats['not_in_universe']:,} region rows skipped: parent protein outside "
                 "the universe (expected -- Pfam covers every reference proteome)",
+                file=sys.stderr,
+            )
+        if stats["demoted_accession"]:
+            print(
+                f"  {stats['demoted_accession']:,} region rows skipped: parent is a secondary "
+                "(demoted) accession of an entry in the flat files, and every accession this "
+                "script writes is a primary one",
                 file=sys.stderr,
             )
         for label, message in (

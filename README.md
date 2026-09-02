@@ -88,7 +88,7 @@ The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which 
 
 **FETCH_DATA** — Queries UniProt for the union of unique proteins across every samplesheet dataset that needs a fetch (extracted directly from each dataset's `protein1`/`protein2` columns and deduplicated, no PPI CSVs concatenated). Retrieves sequences (canonical + isoform-specific via the FASTA endpoint), GO annotations (biological process, molecular function, cellular component), and NCBI taxon IDs. Outputs `sequences.fasta`, `go_annotations.tsv`, and `species.tsv`, published to `results/_shared/data/`, then split back out per dataset (`SUBSET_FETCHED_DATA`) — see [Multiple datasets (samplesheet)](#multiple-datasets-samplesheet) below.
 
-**FETCH_DOMAIN_META** — DDI mode only, replacing `FETCH_DATA`. Pools the Pfam family accessions across every dataset that needs a fetch and resolves them in one streaming pass over Pfam's bulk files, with no per-family API requests: `Pfam-A.regions.tsv.gz` for every region's family, parent accession and alignment coordinates, `Pfam-A.clans.tsv.gz` for family → clan, and one or more UniProt flat files for the parent sequence, taxon and review flag the regions table lacks. Samples up to `M` instances per family out of the strata `--instance_tiers` names — and writes `sequences.fasta` keyed by instance, `species.tsv`, a header-only `go_annotations.tsv`, `instances.tsv` and `dropped_families.tsv` (every requested family that kept no instance, with the reason) — published to `results/_shared/data/`, then split back out per dataset (`SUBSET_DOMAIN_DATA`).
+**FETCH_DOMAIN_META** — DDI mode only, replacing `FETCH_DATA`. Pools the Pfam family accessions across every dataset that needs a fetch and resolves them in one streaming pass over Pfam's bulk files, with no per-family API requests: `Pfam-A.regions.tsv.gz` for every region's family, parent accession and alignment coordinates, `Pfam-A.clans.tsv.gz` for family → clan, and one or more UniProt flat files for the parent sequence, taxon and review flag the regions table lacks (indexed under each entry's **primary** accession only — see below). Samples up to `M` instances per family out of the strata `--instance_tiers` names — and writes `sequences.fasta` keyed by instance, `species.tsv`, a header-only `go_annotations.tsv`, `instances.tsv` and `dropped_families.tsv` (every requested family that kept no instance, with the reason) — published to `results/_shared/data/`, then split back out per dataset (`SUBSET_DOMAIN_DATA`).
 
 **GET_LENGTHS** — Computes per-protein sequence lengths for length-normalized BLAST scores. Runs once on the shared fetch batch (see above) for datasets needing a fetch, and once per dataset for datasets supplying a precomputed `sequences.fasta`.
 
@@ -438,16 +438,34 @@ uniprot_sprot_human.dat.gz are unreviewed. Pass the matching TrEMBL flat file
 (--uniprot-dat uniprot_trembl_*.dat.gz).
 ```
 
+**Every accession that leaves DDI mode is a UniProt primary accession** — the
+`protein_id` column of `instances.tsv`, the parent inside every instance id, the
+`species.tsv` rows. Only an entry's first accession (the first one on its first
+`AC` line) is indexed; everything after it is a secondary accession, i.e. a name
+UniProt has demoted into that entry. A Pfam region whose `pfamseq_acc` has since
+been demoted is **dropped and counted**, never rewritten to the primary that
+absorbed it: Pfam's coordinates are offsets into the sequence Pfam had for the
+demoted accession, and the absorbing entry may carry a different one, so
+canonicalising the key would keep the region while silently shifting the domain
+boundaries — and those boundaries are what gets cut, embedded and published. It is
+never fatal: the region count is on `FETCH_DOMAIN_META`'s stderr and the families
+that lost *every* region that way are in the drop report below. Downstream
+consumers (`daisybio/domainsplit`) parse the same flat files into one record per
+primary accession and resolve no secondaries, so a secondary accession leaving
+here would arrive there as a protein with no sequence, no GO terms and no STRING
+id.
+
 `FETCH_DOMAIN_META` always writes **`_shared/data/dropped_families.tsv`**
 (`family`, `reason`), one row per requested family that kept no instance:
 
 | `reason` | meaning |
 |---|---|
 | `no_eligible_instances` | Pfam has the family, but nothing in a stratum `--instance_tiers` names. Under a narrow set this is the expected bulk; with all four named it should be empty |
+| `demoted_accession` | Pfam has the family, but every region of it names an accession UniProt has demoted to a secondary — the family is lost to a release skew, not to `--instance_tiers`. Takes precedence over `no_eligible_instances`, which would otherwise blame the knob |
 | `dead` | the accession is listed in `Pfam-A.dead` |
 | `not_in_pfam` | no regions in `Pfam-A.regions` and not listed as dead — usually a typo in the input |
 
-The three are counted and warned separately on `FETCH_DOMAIN_META`'s stderr, so a
+The four are counted and warned separately on `FETCH_DOMAIN_META`'s stderr, so a
 large `--instance_tiers` drop cannot hide among dead accessions. Note this
 compounds with `ddi_examples_pool_factor`: asking for `M = 25` instances from one
 stratum will underfill most families, and fewer instances per family is *good* for
