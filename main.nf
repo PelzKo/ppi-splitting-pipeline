@@ -27,6 +27,7 @@ nextflow.enable.dsl=2
  */
 params {
     split_only: Boolean
+    bias_only: Boolean
     seed: Integer
     heatmap_max_per_split: Integer
 
@@ -73,6 +74,8 @@ include { SPLIT_POSITIVES }  from './subworkflows/split_positives'
 include { SAMPLE_NEGATIVES } from './subworkflows/sample_negatives'
 include { TRAIN_BASELINE }   from './subworkflows/train_baseline'
 include { QC }               from './subworkflows/qc'
+include { BIAS_DIAGNOSTICS } from './subworkflows/bias_diagnostics'
+include { MULTIQC }          from './processes/qc'
 
 include { mqcLabel }        from './helpers/mqc_labels'
 
@@ -174,6 +177,7 @@ def buildDatasetsChannel() {
     def fields = [
         "id", "ppis", "sequences", "go_annotations", "species", "domain_instances", "blast_results", "candidate_network",
         "partition", "node_mapping",
+        "train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis",
         "embedding_model", "cdhit_identity", "cdhit_wordsize", "split_method", "edge_weight",
         "kahip_k", "ilp_kahip_k", "train_split", "val_split", "test_split", "ilp_epsilon", "ilp_max_sec",
         "negative_sampling_method",
@@ -188,6 +192,32 @@ def buildDatasetsChannel() {
 
     return channel.fromList(rows).map { rowList ->
         def row = [fields, rowList].transpose().collectEntries { k, v -> [(k): v] }
+
+        // Every mode except --bias_only reads the raw PPI CSV (DATA_PREP/
+        // SPLIT_POSITIVES); --bias_only never touches it, so it's the one
+        // mode where ppis may be left blank in the samplesheet.
+        if (!params.bias_only && !isGiven(row.ppis)) {
+            error("ppis is required for every samplesheet row unless --bias_only is set (row '${row.id}' is missing it).")
+        }
+
+        // bias_only skips everything upstream of the bias diagnostics, so the
+        // splits, BLAST hits, species table, GO annotations (PPI mode only) and
+        // embeddings must all be supplied precomputed. Re-checked in
+        // PPI_SPLITTING's body for every caller -- change the two together, same
+        // as the --split_only check below.
+        if (params.bias_only) {
+            def required = ["train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis", "species", "blast_results"]
+            if (!params.ddi_mode) {
+                required << "go_annotations"
+            }
+            def missing = required.findAll { !row[it] }
+            if (missing) {
+                error("--bias_only requires every samplesheet row to supply ${required.join(', ')} (row '${row.id}' is missing ${missing.join(', ')}).")
+            }
+            if (!isGiven(row.embedding_model) || row.embedding_model in ["none", "esm2", "prot_t5"]) {
+                error("--bias_only requires embedding_model to be a path to a precomputed .npz (row '${row.id}' has '${row.embedding_model}') -- there's no embedding step to compute it.")
+            }
+        }
 
         // split_only skips FETCH_DATA/CLUSTERING/TRAIN_BASELINE/QC entirely,
         // so every one of those steps' precomputed-input escape hatches
@@ -245,7 +275,7 @@ def buildDatasetsChannel() {
         // optional file is [] and never null -- a `path` input accepts [] as
         // "no file", and null would blow up staging.
         def files = [
-            ppis             : file(row.ppis, checkIfExists: true),
+            ppis             : row.ppis              ? file(row.ppis,              checkIfExists: true) : [],
             sequences        : row.sequences         ? file(row.sequences,         checkIfExists: true) : [],
             go_annotations   : row.go_annotations    ? file(row.go_annotations,    checkIfExists: true) : [],
             species          : row.species           ? file(row.species,           checkIfExists: true) : [],
@@ -254,6 +284,13 @@ def buildDatasetsChannel() {
             candidate_network: row.candidate_network ? file(row.candidate_network, checkIfExists: true) : [],
             partition        : row.partition         ? file(row.partition,         checkIfExists: true) : [],
             node_mapping     : row.node_mapping      ? file(row.node_mapping,      checkIfExists: true) : [],
+            // --bias_only's four precomputed splits (in DDI mode the
+            // instance-level *_instances.csv files, which is what BIAS_ANALYSIS
+            // reads in a full run too).
+            train_ppis         : row.train_ppis         ? file(row.train_ppis,         checkIfExists: true) : [],
+            val_ppis           : row.val_ppis           ? file(row.val_ppis,           checkIfExists: true) : [],
+            test_balanced_ppis : row.test_balanced_ppis ? file(row.test_balanced_ppis, checkIfExists: true) : [],
+            test_realistic_ppis: row.test_realistic_ppis ? file(row.test_realistic_ppis, checkIfExists: true) : [],
         ]
         tuple(meta, files)
     }
@@ -267,7 +304,9 @@ workflow PPI_SPLITTING {
     take:
     datasets_ch   // tuple(meta, filesMap); filesMap keys: ppis, sequences, go_annotations,
                   // species, domain_instances, blast_results, candidate_network, partition,
-                  // node_mapping. An absent optional file is [], never null. meta carries
+                  // node_mapping, train_ppis, val_ppis, test_balanced_ppis,
+                  // test_realistic_ppis (the last four read only under --bias_only).
+                  // An absent optional file is [], never null. meta carries
                   // `id` plus every per-dataset parameter override -- see
                   // buildDatasetsChannel() for the full list, and note that mutating meta
                   // downstream breaks the joins, which key on the whole map.
@@ -290,7 +329,31 @@ workflow PPI_SPLITTING {
     // join()/combine(by: 0) below -- so the closure hands back the two objects it
     // was given, untouched, and a caller that asked for kahip under --split_only
     // is told rather than quietly given something else.
+    // The two shortcuts skip disjoint halves of the pipeline, so together they
+    // would run nothing at all.
+    if (params.split_only && params.bias_only) {
+        error("--split_only and --bias_only are mutually exclusive: the first stops after the splits, the second starts from precomputed ones.")
+    }
+
     checked_ch = datasets_ch.map { meta, f ->
+        if (!params.bias_only && !f.ppis) {
+            error("Dataset '${meta.id}' supplies no ppis file, which every mode except --bias_only reads.")
+        }
+        // --bias_only: the same row-level check buildDatasetsChannel() makes for a
+        // samplesheet run, repeated for every caller. Change the two together.
+        if (params.bias_only) {
+            def required = ["train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis", "species", "blast_results"]
+            if (!params.ddi_mode) {
+                required << "go_annotations"
+            }
+            def missing = required.findAll { k -> !f[k] }
+            if (missing) {
+                error("--bias_only requires every dataset to supply ${required.join(', ')} (dataset '${meta.id}' is missing ${missing.join(', ')}).")
+            }
+            if (!meta.embedding_model || meta.embedding_model.toString() in ["none", "esm2", "prot_t5"]) {
+                error("--bias_only requires embedding_model to be a path to a precomputed .npz (dataset '${meta.id}' has '${meta.embedding_model}') -- there's no embedding step to compute it.")
+            }
+        }
         if (params.split_only) {
             // DDI mode has no GO annotations at all (they describe proteins, not
             // domain families) and needs the domain instance table instead.
@@ -320,6 +383,12 @@ workflow PPI_SPLITTING {
     // whether the network is in play.
     prepared_ch = checked_ch.map { meta, f ->
         def negsets = parseNegsets(meta, f.candidate_network)
+        // A --bias_only row hands over one set of four split CSVs, so it is exactly
+        // one negative set; its name is what keys the scatter plot and the
+        // published bias/<negset>/ directory. Several sets are several rows.
+        if (params.bias_only && negsets.size() != 1) {
+            error("Dataset '${meta.id}': --bias_only takes one negative set per row, whose four split CSVs the row supplies, but negative_sampling_method names ${negsets.size()} (${negsets.join(', ')}). Use one row per set.")
+        }
         checkMqcLabels(meta, negsets)
         if (f.candidate_network && !("ilp_candidates" in negsets)) {
             log.warn "${meta.id}: candidate_network supplied but negative_sampling_method does not list 'ilp_candidates' -- ignoring the network everywhere, including SELECT_EXAMPLES"
@@ -347,65 +416,105 @@ workflow PPI_SPLITTING {
         .collect()
         .map { labels -> resolveMqcOrder(labels) }
 
-    // DDI mode swaps the whole data-prep front end: Pfam family accessions in
-    // place of UniProt ones, domain instances in place of full chains. Both
-    // subworkflows emit the same channel names, so nothing downstream branches.
-    // Both take the whole files map and pick the keys they need -- which keys
-    // those are is stated in each one's `take:` comment.
-    if (params.ddi_mode) {
-        data = DATA_PREP_DDI(checked_ch)
-    } else {
-        data = DATA_PREP(checked_ch)
-    }
-
-    if (params.split_only) {
-        // --split_only: partition/node_mapping are precomputed and required
-        // (validated above, for every caller), so CLUSTERING (FETCH_DATA/
-        // RUN_BLAST/MAKE_METIS/RUN_KAHIP) never needs to run at all.
-        partition_ch    = checked_ch.map { meta, f -> tuple(meta, f.partition) }
-        node_mapping_ch = checked_ch.map { meta, f -> tuple(meta, f.node_mapping) }
-    } else {
-        clustered = CLUSTERING(
-            data.sequences, data.lengths,
+    if (params.bias_only) {
+        // --bias_only: everything upstream of the bias diagnostics is skipped, and
+        // the four labelled splits come straight from the files map (validated
+        // above, for every caller). Each row is one negative set -- also checked
+        // above -- whose name keys the scatter plot and bias/<negset>/, exactly as
+        // SAMPLE_NEGATIVES' per-split emits would in a full run.
+        bias_in = checked_ch.join(negsets_ch).map { meta, f, negsets -> tuple(meta, negsets[0], f) }
+        bias = BIAS_DIAGNOSTICS(
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.train_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.val_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.test_balanced_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.test_realistic_ppis) },
             checked_ch.map { meta, f -> tuple(meta, f.blast_results) },
-            data.instances
+            checked_ch.map { meta, f -> tuple(meta, file(meta.embedding_model, checkIfExists: true)) },
+            // [] under --ddi_mode, which has no GO table; BIAS_ANALYSIS drops the flag.
+            checked_ch.map { meta, f -> tuple(meta, f.go_annotations) },
+            checked_ch.map { meta, f -> tuple(meta, f.species) }
         )
-        partition_ch    = clustered.partition
-        node_mapping_ch = clustered.node_mapping
-    }
+        // The scatter plots are the whole report here: there are no splitting,
+        // sampling or classifier stages to chart.
+        multiqc_report_ch = MULTIQC(bias.scatter.map { id, f -> f }.collect(), mqc_order_ch).report
 
-    split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch, data.instances, candidate_network_ch)
+        // Nothing but the report exists in this mode. Every emit is still defined,
+        // so the emit shape does not depend on the mode.
+        instances_ch        = channel.empty()
+        sequences_ch        = channel.empty()
+        labelled_ch         = channel.empty()
+        labelled_inst_ch    = channel.empty()
+        dropped_families_ch = channel.empty()
+    } else {
+        // DDI mode swaps the whole data-prep front end: Pfam family accessions in
+        // place of UniProt ones, domain instances in place of full chains. Both
+        // subworkflows emit the same channel names, so nothing downstream branches.
+        // Both take the whole files map and pick the keys they need -- which keys
+        // those are is stated in each one's `take:` comment.
+        if (params.ddi_mode) {
+            data = DATA_PREP_DDI(checked_ch)
+        } else {
+            data = DATA_PREP(checked_ch)
+        }
 
-    neg = SAMPLE_NEGATIVES(
-        split.train_ppis, split.val_ppis, split.test_ppis,
-        data.species, data.go_annotations,
-        candidate_network_ch,
-        // DDI mode only (both empty channels in PPI mode): the per-split example
-        // tables, protein universes and reserves of never-in-play proteins
-        // EXPAND_NEGATIVES turns family pairs into instance pairs with.
-        split.ddi_files, data.instances,
-        negsets_ch
-    )
+        if (params.split_only) {
+            // --split_only: partition/node_mapping are precomputed and required
+            // (validated above, for every caller), so CLUSTERING (FETCH_DATA/
+            // RUN_BLAST/MAKE_METIS/RUN_KAHIP) never needs to run at all.
+            partition_ch    = checked_ch.map { meta, f -> tuple(meta, f.partition) }
+            node_mapping_ch = checked_ch.map { meta, f -> tuple(meta, f.node_mapping) }
+        } else {
+            clustered = CLUSTERING(
+                data.sequences, data.lengths,
+                checked_ch.map { meta, f -> tuple(meta, f.blast_results) },
+                data.instances
+            )
+            partition_ch    = clustered.partition
+            node_mapping_ch = clustered.node_mapping
+        }
 
-    // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +
-    // REMOVE_REDUNDANT + SAMPLE_NEGATIVES_ILP have already produced and
-    // published the four split files; TRAIN_BASELINE/QC add nothing this
-    // mode asks for. There is then no report to emit either.
-    multiqc_report_ch = channel.empty()
-    if (!params.split_only) {
-        baseline = TRAIN_BASELINE(
-            split.train_fasta, split.val_fasta, split.test_fasta,
-            neg.train, neg.val, neg.test_balanced, neg.test_realistic
+        split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch, data.instances, candidate_network_ch)
+
+        neg = SAMPLE_NEGATIVES(
+            split.train_ppis, split.val_ppis, split.test_ppis,
+            data.species, data.go_annotations,
+            candidate_network_ch,
+            // DDI mode only (both empty channels in PPI mode): the per-split example
+            // tables, protein universes and reserves of never-in-play proteins
+            // EXPAND_NEGATIVES turns family pairs into instance pairs with.
+            split.ddi_files, data.instances,
+            negsets_ch
         )
 
-        qc = QC(
-            neg.train, neg.val, neg.test_balanced, neg.test_realistic,
-            clustered.blast_out, baseline.embeddings, data.go_annotations, data.species,
-            split.train_fasta, split.val_fasta, split.test_fasta,
-            split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc,
-            mqc_order_ch
-        )
-        multiqc_report_ch = qc.multiqc_report
+        // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +
+        // REMOVE_REDUNDANT + SAMPLE_NEGATIVES_ILP have already produced and
+        // published the four split files; TRAIN_BASELINE/QC add nothing this
+        // mode asks for. There is then no report to emit either.
+        multiqc_report_ch = channel.empty()
+        if (!params.split_only) {
+            baseline = TRAIN_BASELINE(
+                split.train_fasta, split.val_fasta, split.test_fasta,
+                neg.train, neg.val, neg.test_balanced, neg.test_realistic
+            )
+
+            bias = BIAS_DIAGNOSTICS(
+                neg.train, neg.val, neg.test_balanced, neg.test_realistic,
+                clustered.blast_out, baseline.embeddings, data.go_annotations, data.species
+            )
+
+            qc = QC(
+                bias.scatter, clustered.blast_out,
+                split.train_fasta, split.val_fasta, split.test_fasta,
+                split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc,
+                mqc_order_ch
+            )
+            multiqc_report_ch = qc.multiqc_report
+        }
+        instances_ch        = data.instances
+        sequences_ch        = data.sequences
+        labelled_ch         = neg.labelled
+        labelled_inst_ch    = neg.labelled_inst
+        dropped_families_ch = data.dropped_families
     }
 
     emit:
@@ -417,16 +526,17 @@ workflow PPI_SPLITTING {
     // a row listing N of them emits N items per split, all over the same positive
     // rows, so a consumer that cares which set a CSV belongs to must join on
     // `by: [0, 1]` rather than on meta alone.
-    instances        = data.instances     // tuple(meta, instances.tsv); (meta, []) in PPI mode
-    sequences        = data.sequences     // tuple(meta, sequences.fasta)
-    labelled         = neg.labelled       // tuple(meta, negset, label, csv) at family level
-    labelled_inst    = neg.labelled_inst  // same, at domain-instance level; empty in PPI mode
+    // Under --bias_only every channel but multiqc_report is empty.
+    instances        = instances_ch       // tuple(meta, instances.tsv); (meta, []) in PPI mode
+    sequences        = sequences_ch       // tuple(meta, sequences.fasta)
+    labelled         = labelled_ch        // tuple(meta, negset, label, csv) at family level
+    labelled_inst    = labelled_inst_ch   // same, at domain-instance level; empty in PPI mode
     multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only
     // tuple([id: "_shared"], dropped_families.tsv) -- the families Pfam had nothing
     // usable for, with a reason column. At most one item, and its meta is the
     // synthetic shared one, so do not join() it against any per-dataset channel.
     // Empty in PPI mode and whenever no dataset needed a fetch.
-    dropped_families = data.dropped_families
+    dropped_families = dropped_families_ch
 }
 
 workflow {

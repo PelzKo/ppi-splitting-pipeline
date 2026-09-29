@@ -3,6 +3,9 @@
 // reads it, and the tag names it unconditionally so a row's several sets are
 // distinguishable in the log.
 process BIAS_ANALYSIS {
+    // Per negative set, so a row's several sets cannot overwrite each other's
+    // {attribute}_bias_mqc.tsv -- the filename carries no set name.
+    publishDir(path: { "${params.outdir}/${meta.id}/bias/${negset}" }, mode: 'copy')
     tag "${meta.id}_${negset}_${attribute}"
     label 'error_retry'
 
@@ -15,6 +18,9 @@ process BIAS_ANALYSIS {
     tuple val(meta), val(negset), path("*_bias_mqc.tsv"), emit: mqc, optional: true
 
     script:
+    // go_annotations is [] only under --bias_only --ddi_mode, where no GO table
+    // exists; the GO attributes are never requested then, so the flag is dropped.
+    def go_arg = go_annotations ? "--go_annotations  ${go_annotations}" : ''
     """
     bias_analysis.py \\
         --attribute       ${attribute} \\
@@ -24,7 +30,7 @@ process BIAS_ANALYSIS {
         --test_realistic  ${test_realistic_csv} \\
         --blast           ${blast_tsv} \\
         --embeddings      ${embeddings} \\
-        --go_annotations  ${go_annotations} \\
+        ${go_arg} \\
         --species         ${species} \\
         --seed            ${params.seed}
     """

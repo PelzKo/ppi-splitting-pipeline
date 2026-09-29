@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PPI splitting pipeline samplesheet schema",
-  "description": "One row per PPI dataset. Only 'id' and 'ppis' are required; every other column may be left blank to fall back to the corresponding value in nextflow.config.",
+  "description": "One row per PPI dataset. Only 'id' and 'ppis' are required ('ppis' may be blank under --bias_only, which needs the four split columns instead); every other column may be left blank to fall back to the corresponding value in nextflow.config.",
   "type": "array",
   "items": {
     "type": "object",
@@ -15,7 +15,7 @@
         "type": "string",
         "format": "file-path",
         "exists": true,
-        "errorMessage": "ppis must be a path to an existing PPI CSV file",
+        "errorMessage": "ppis must be a path to an existing PPI CSV file. Required unless --bias_only is set.",
         "pattern": "^.*\\.csv$"
       },
       "sequences": {
@@ -73,6 +73,34 @@
         "exists": true,
         "errorMessage": "If supplied, node_mapping must be a path to an existing node_mapping.tsv. Only used when --split_only is set (bypasses CLUSTERING).",
         "pattern": "node_mapping\\.tsv$"
+      },
+      "train_ppis": {
+        "type": "string",
+        "format": "file-path",
+        "exists": true,
+        "errorMessage": "If supplied, train_ppis must be a path to an existing train split CSV. Only used when --bias_only is set (bypasses everything upstream of the bias diagnostics).",
+        "pattern": "^.*\\.csv$"
+      },
+      "val_ppis": {
+        "type": "string",
+        "format": "file-path",
+        "exists": true,
+        "errorMessage": "If supplied, val_ppis must be a path to an existing val split CSV. Only used when --bias_only is set (bypasses everything upstream of the bias diagnostics).",
+        "pattern": "^.*\\.csv$"
+      },
+      "test_balanced_ppis": {
+        "type": "string",
+        "format": "file-path",
+        "exists": true,
+        "errorMessage": "If supplied, test_balanced_ppis must be a path to an existing balanced test split CSV. Only used when --bias_only is set (bypasses everything upstream of the bias diagnostics).",
+        "pattern": "^.*\\.csv$"
+      },
+      "test_realistic_ppis": {
+        "type": "string",
+        "format": "file-path",
+        "exists": true,
+        "errorMessage": "If supplied, test_realistic_ppis must be a path to an existing realistic test split CSV. Only used when --bias_only is set (bypasses everything upstream of the bias diagnostics).",
+        "pattern": "^.*\\.csv$"
       },
       "embedding_model": {
         "type": "string",
@@ -157,6 +185,6 @@
         "minimum": 0
       }
     },
-    "required": ["id", "ppis"]
+    "required": ["id"]
   }
 }

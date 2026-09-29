@@ -4,7 +4,7 @@
 Not part of the pipeline -- run by hand after a run, so the end-to-end checks are
 one command rather than the ad-hoc shell the implementation plan used per step.
 
-    python bin/other/check_ddi_invariants.py --results results/results_test_ddi
+    python tools/check_ddi_invariants.py --results results/results_test_ddi
 
 Point --results at either a single dataset directory or the whole outdir, in
 which case every dataset under it is checked (`_shared` is skipped). Exits 1 if
@@ -49,7 +49,7 @@ import re
 import sys
 from collections import defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 
 from utils import instance_parent, read_instances
 

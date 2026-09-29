@@ -58,12 +58,13 @@ Instance ids use '_' as the separator, never '|':
 
     PF00069_P12345_10_250
 
-make_metis.py, bias_analysis.py and plot_similarity_heatmap.py all undo
-`makeblastdb -parse_seqids` with `s.split("|")[1] if "|" in s else s`. On a
-pipe-delimited instance id that yields the bare parent accession, which is
-absent from `lengths`, so every hit would be dropped and the similarity graph
-would come out empty with no error at all. Parse the id back with
-`rsplit("_", 3)`.
+A "|" would make the id look like an NCBI defline to BLAST and to anything
+that ever reintroduces `makeblastdb -parse_seqids` (removed from RUN_BLAST, and
+with it the `s.split("|")[1]` undo in make_metis.py, bias_analysis.py and
+plot_similarity_heatmap.py). Undoing it on a pipe-delimited instance id would
+yield the bare parent accession, absent from `lengths`, so every hit would be
+dropped and the similarity graph would come out empty with no error at all.
+Parse the id back with `rsplit("_", 3)`.
 """
 
 import argparse

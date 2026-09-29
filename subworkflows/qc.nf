@@ -1,5 +1,5 @@
-include { BIAS_ANALYSIS; COLLECT_BIAS; DDI_ATTRITION; SIMILARITY_HEATMAP; MULTIQC } from '../processes/qc'
-include { mqcLabel; mqcRowLabel } from '../helpers/mqc_labels'
+include { DDI_ATTRITION; SIMILARITY_HEATMAP; MULTIQC } from '../processes/qc'
+include { mqcRowLabel } from '../helpers/mqc_labels'
 
 // Some mqc-emitting processes glob-match more than one file per task, which
 // Nextflow packs into a List -- flatten to one (id, file) pair per file so
@@ -15,19 +15,14 @@ def flattenMqc(ch) {
     }
 }
 
-// Runs the per-attribute bias analyses, collects them into a scatter plot,
-// builds the train/val/test similarity heatmap, and assembles one combined
-// MultiQC report for the whole run from every dataset's diagnostics.
+// Builds the train/val/test similarity heatmap and assembles one combined
+// MultiQC report for the whole run from every dataset's diagnostics. The bias
+// analyses and their scatter plots are computed upstream by BIAS_DIAGNOSTICS
+// (subworkflows/bias_diagnostics.nf), which --bias_only also runs on its own.
 workflow QC {
     take:
-    train_ppis            // tuple(meta, negset, path)
-    val_ppis
-    test_balanced_ppis
-    test_realistic_ppis
+    bias_scatter          // tuple(display label, bias_scatter_mqc.html) -- BIAS_DIAGNOSTICS.scatter
     blast_out
-    embeddings
-    go_annotations_ch
-    species_ch
     train_fasta
     val_fasta
     test_fasta
@@ -38,61 +33,6 @@ workflow QC {
     mqc_order             // comma-joined display labels, in report order (resolved in main.nf)
 
     main:
-    // Whether to include "same_species" depends on each dataset's own
-    // species.tsv, so it's computed per-dataset here rather than with a
-    // single run-wide collect().
-    // DDI mode drops the three GO-based attributes -- domain families carry no
-    // GO annotations at all, so DATA_PREP_DDI emits a header-only table -- and
-    // adds parent_degree. The other four need no change: sequence_similarity,
-    // embedding_similarity and same_species act on the domain instances the rows
-    // hold, while self_interactions and topology_shortcut act on the node pair,
-    // which bias_analysis.py reads from the rows' own family1/family2 columns.
-    // These names must match bias_analysis.py's ATTRIBUTES dict exactly -- it is
-    // also the argparse `choices`, so a mismatch is a hard task failure.
-    attrs_ch = species_ch.map { meta, sp ->
-        def taxa = sp.splitCsv(header: true, sep: '\t').collect { it.taxon_id }.unique()
-        def attrs = params.ddi_mode
-            ? ["sequence_similarity", "embedding_similarity", "self_interactions",
-               "topology_shortcut", "parent_degree"]
-            : ["sequence_similarity", "embedding_similarity",
-               "functional_relatedness_BP", "functional_relatedness_MF",
-               "functional_relatedness_CC", "self_interactions",
-               "topology_shortcut"]
-        if (taxa.size() > 1) attrs << "same_species"
-        tuple(meta, attrs)
-    }.flatMap { meta, attrs -> attrs.collect { a -> tuple(meta, a) } }
-
-    // One negative set's four labelled CSVs in one item, keyed (meta, negset) --
-    // join(by: [0, 1]), because a plain 1:1 join on meta would pair one negative
-    // set's train CSV with another's val CSV once a row asks for several.
-    negset_splits = train_ppis.join(val_ppis, by: [0, 1])
-        .join(test_balanced_ppis,  by: [0, 1])
-        .join(test_realistic_ppis, by: [0, 1])
-    // tuple(meta, negset, train, val, test_balanced, test_realistic)
-
-    // blast/embeddings/go/species are one-per-dataset; combine(by: 0) broadcasts
-    // each dataset's single set of files to every one of that dataset's
-    // (attribute, negative set) pairs, rather than a full cross-join. The bias
-    // analysis runs per negative set because that is the half of each dataset the
-    // sets differ in -- the positive half is shared by construction.
-    bias_inputs = negset_splits
-        .combine(attrs_ch, by: 0)
-        .map { meta, negset, train, val, tb, tr, attr -> tuple(meta, attr, negset, train, val, tb, tr) }
-        .combine(blast_out,         by: 0)
-        .combine(embeddings,        by: 0)
-        .combine(go_annotations_ch, by: 0)
-        .combine(species_ch,        by: 0)
-
-    bias = BIAS_ANALYSIS(bias_inputs)
-
-    // One scatter per (dataset, negative set): the negset-qualified id is what
-    // keeps a row's two sets from being averaged into a single plot.
-    bias_by_negset = bias.mqc.flatMap { meta, negset, f ->
-        def files = (f instanceof List) ? f : [f]
-        files.collect { ff -> tuple(mqcLabel(meta, negset), ff) }
-    }
-    scatter = COLLECT_BIAS(bias_by_negset.groupTuple())
-
     // meta.id AND the display label: the first is SIMILARITY_HEATMAP's publishDir
     // component, the second only names the report section. They differ for a row
     // with several negative sets, so passing one for both would move a published
@@ -127,12 +67,12 @@ workflow QC {
     ddi_attrition = params.ddi_mode ? DDI_ATTRITION(splitting_mqc.groupTuple()).mqc : channel.empty()
 
     // Bias tables are deliberately excluded here -- they don't add value
-    // over the bias_scatter plot above, which is what's kept. bias.mqc
-    // still feeds COLLECT_BIAS unconditionally, just not this final mix.
+    // over the bias_scatter plot, which is what's kept; BIAS_ANALYSIS publishes
+    // them under <id>/bias/<negset>/ instead.
     mqc_files = splitting_mqc
         .mix(flattenMqc(neg_mqc))
         .mix(flattenMqc(clf_mqc))
-        .mix(scatter.mqc)
+        .mix(bias_scatter)
         .mix(heatmap)
         .mix(ddi_attrition)
         .map { id, f -> f }

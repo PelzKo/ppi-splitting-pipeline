@@ -68,7 +68,7 @@ def parse_blast_pident(path):
             if len(cols) < 5:
                 continue
             q = cols[0]
-            s = cols[1].split("|")[1] if "|" in cols[1] else cols[1]
+            s = cols[1]
             if q == s:
                 continue
             try:
@@ -249,7 +249,7 @@ def _prepare_split(pairs, y, embeddings):
 
 
 def func_relatedness(pairs, go_anns, category):
-    """Jaccard similarity of GO term sets for one category per pair; 0.0 if union is empty."""
+    """Jaccard index of GO term sets for one category per pair; 0.0 if union is empty."""
     empty = frozenset()
     sims = []
     for p1, p2 in pairs:
@@ -361,7 +361,11 @@ def main():
     ap.add_argument("--test_realistic", required=True)
     ap.add_argument("--blast", required=True)
     ap.add_argument("--embeddings", required=True)
-    ap.add_argument("--go_annotations", required=True)
+    ap.add_argument(
+        "--go_annotations",
+        default=None,
+        help="go_annotations.tsv from fetch_data; required for the functional_relatedness_* attributes",
+    )
     ap.add_argument("--species", default=None, help="species.tsv from fetch_data; required for same_species attribute")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -381,6 +385,8 @@ def main():
 
     go_anns = None
     if args.attribute.startswith("functional_relatedness"):
+        if args.go_annotations is None:
+            sys.exit("--go_annotations is required for the functional_relatedness_* attributes")
         go_anns = load_go_annotations(args.go_annotations)
 
     species = None

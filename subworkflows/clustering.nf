@@ -2,7 +2,9 @@ include { RUN_BLAST; MAKE_METIS; RUN_KAHIP } from '../processes/clustering'
 
 // Builds the protein similarity graph (BLAST all-vs-all -> METIS graph) and
 // partitions it with KaHIP, ready for SPLIT_POSITIVES. Each dataset can
-// skip BLAST via the samplesheet's blast_results column.
+// skip BLAST via the samplesheet's blast_results column. BLAST still runs
+// for "random"-split datasets (bias diagnostics/QC need it), but METIS/KaHIP
+// don't -- SPLIT_POSITIVES's random branch never looks at the partition.
 workflow CLUSTERING {
     take:
     sequences_ch      // tuple(meta, fasta)
@@ -23,7 +25,19 @@ workflow CLUSTERING {
     // In DDI mode instances.tsv contracts the graph to one node per Pfam clan.
     // Both DATA_PREP and DATA_PREP_DDI emit `instances` for every dataset ([] in
     // PPI mode), so this join can never drop one.
-    metis_out = MAKE_METIS(blast_out.join(lengths_ch).join(instances_ch))
+    //
+    // "random" datasets skip METIS/KaHIP and get (meta, []) placeholders below
+    // instead, so SPLIT_POSITIVES's partition/node_mapping joins still pair them.
+    // SPLIT_RANDOM reads neither -- in DDI mode it takes the clan mapping from
+    // instances.tsv, not from node_mapping.tsv.
+    metis_branched = blast_out.join(lengths_ch).join(instances_ch).branch { meta, results, lengths, instances ->
+        skip_partition: meta.split_method == "random"
+            return meta
+        needs_partition: true
+            return tuple(meta, results, lengths, instances)
+    }
+
+    metis_out = MAKE_METIS(metis_branched.needs_partition)
 
     // The ILP splitter clusters proteins into many small KaHIP partitions
     // first, whereas the default splitter partitions straight into train/val/test.
@@ -46,10 +60,12 @@ workflow CLUSTERING {
         }
         tuple(meta, graph, k)
     }
-    partition = RUN_KAHIP(kahip_inputs)
+    kahip_out = RUN_KAHIP(kahip_inputs)
+
+    skipped = metis_branched.skip_partition.map { meta -> tuple(meta, []) }
 
     emit:
     blast_out    = blast_out
-    node_mapping = metis_out.node_mapping
-    partition    = partition
+    node_mapping = metis_out.node_mapping.mix(skipped)
+    partition    = kahip_out.mix(skipped)
 }

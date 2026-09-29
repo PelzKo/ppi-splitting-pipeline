@@ -180,7 +180,7 @@ process SELECT_EXAMPLES {
     tuple val(meta), path("val_reserve.txt"),   emit: val_reserve
     tuple val(meta), path("test_reserve.txt"),  emit: test_reserve
     // Their union, published unpartitioned as a diagnostic -- and what
-    // bin/other/check_ddi_invariants.py reads.
+    // tools/check_ddi_invariants.py reads.
     tuple val(meta), path("unclaimed.txt"), emit: unclaimed
     tuple val(meta), path("*_mqc.tsv"),     emit: mqc
 

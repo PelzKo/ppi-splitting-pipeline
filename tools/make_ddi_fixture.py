@@ -30,8 +30,8 @@ random pairing would be almost entirely cross-cluster and the attrition numbers
 would say more about the fixture than about the pipeline.
 
 Usage:
-    python bin/other/make_ddi_fixture.py --out data/test_ddis.csv
-    python bin/other/make_ddi_fixture.py --clans /path/to/Pfam-A.clans.tsv.gz    # offline
+    python tools/make_ddi_fixture.py --out data/test_ddis.csv
+    python tools/make_ddi_fixture.py --clans /path/to/Pfam-A.clans.tsv.gz    # offline
 """
 
 import argparse

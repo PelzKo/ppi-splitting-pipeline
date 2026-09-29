@@ -109,8 +109,8 @@ def instance_parent(instance_id):
 
     bin/fetch_domains.py builds instance ids as f"{family}_{protein}_{start}_{end}"
     -- underscore-separated rather than pipe-separated on purpose, since a "|"
-    would be parsed as an NCBI defline by `makeblastdb -parse_seqids` and then
-    undone by the split("|") in make_metis.py. Neither a Pfam accession nor a
+    reads as an NCBI defline separator to BLAST tooling (`makeblastdb
+    -parse_seqids`, no longer used by RUN_BLAST, would split on it). Neither a Pfam accession nor a
     UniProt accession contains an underscore, so a right-anchored split recovers
     all four fields. This is the only place that parse lives; every consumer that
     has the instances.tsv to hand should read its protein_id column instead.
