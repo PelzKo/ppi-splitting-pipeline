@@ -19,7 +19,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import mqc_category, read_fasta, read_ppis, write_fasta, write_ppi_csv
+from utils import (
+    expand_members,
+    instances_by_family,
+    mqc_category,
+    read_fasta,
+    read_instances,
+    read_ppis,
+    strict_survivors,
+    write_fasta,
+    write_ppi_csv,
+)
 
 
 def fasta_ids(path):
@@ -36,28 +46,34 @@ def filter_ppis(rows, keep):
     return [row for row in rows if row["protein1"] in keep and row["protein2"] in keep]
 
 
-def write_mqc(split_results, id_, n_ppis_discarded):
+def write_mqc(split_results, id_, n_ppis_discarded, ddi=False):
     """The sole contributor to the per-dataset "split_bar_{id_}" PPI
     Partitioning bar chart for kahip/ilp datasets (sort_ppis.py/solve_ilp.py
     contribute nothing themselves -- see their modules): train/val/test show
     their final (post-CD-HIT) Kept size, and the single "discarded" bar is
     stacked by discard reason -- cross-partition (KaHIP/ILP, computed here
     from the original pre-split ppis.csv) vs CD-HIT-2D redundancy removal
-    (summed across val+test)."""
+    (summed across val+test).
+
+    `ddi` only relabels -- the rows are Pfam family pairs rather than PPIs in
+    DDI mode. The counts and the `id` are the same either way, and
+    ddi_attrition.py reduces this bar plus SELECT_EXAMPLES' into the run's
+    attrition waterfall by matching these column headers."""
     total_cdhit_removed = sum(r["n_ppis_removed"] for r in split_results)
+    noun = "DDI" if ddi else "PPI"
 
     with open("remove_redundant_bar_mqc.tsv", "w") as fh:
         fh.write(
             f"# id: 'split_bar_{id_}'\n"
-            f"# section_name: 'PPI Partitioning: {id_}'\n"
-            "# description: 'PPI counts per split. The discarded bar is coloured by why "
-            "a PPI never made it into a split: cross-partition (KaHIP/ILP) or removed by "
+            f"# section_name: '{noun} Partitioning: {id_}'\n"
+            f"# description: '{noun} counts per split. The discarded bar is coloured by why "
+            f"a {noun} never made it into a split: cross-partition (KaHIP/ILP) or removed by "
             "CD-HIT-2D redundancy filtering.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             f"#     id: 'split_bar_plot_{id_}'\n"
-            f"#     title: 'PPI Partitioning: edges per split ({id_})'\n"
-            "#     ylab: '# PPIs'\n"
+            f"#     title: '{noun} Partitioning: edges per split ({id_})'\n"
+            f"#     ylab: '# {noun}s'\n"
             "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)\n"
         )
         for r in split_results:
@@ -82,7 +98,15 @@ def main():
     ap.add_argument("--sim_train_val", required=True)
     ap.add_argument("--sim_train_test", required=True)
     ap.add_argument("--id", required=True, help="Dataset ID, for MultiQC tagging")
+    ap.add_argument(
+        "--instances",
+        help="instances.tsv (DDI mode): CD-HIT-2D judges domain instances but the CSVs are keyed "
+        "by Pfam family, so a family survives only if every instance of it did. Omit for PPI mode.",
+    )
     args = ap.parse_args()
+
+    members = instances_by_family(read_instances(args.instances)) if args.instances else None
+    node_label = "families" if members else "proteins"
 
     n_input = len(read_ppis(args.ppis))
 
@@ -98,27 +122,33 @@ def main():
     val_keep = fasta_ids(args.sim_train_val)
     test_keep = fasta_ids(args.sim_train_test)
 
-    train_prot_nr = set(train_seqs)
-    val_prot_nr = set(val_seqs) & val_keep
-    test_prot_nr = set(test_seqs) & test_keep
+    # Two vocabularies that coincide in PPI mode and diverge in DDI mode: the
+    # CSVs are keyed by node (protein / Pfam family), the FASTAs and CD-HIT's
+    # verdict by sequence id (protein / domain instance). strict_survivors
+    # returns nodes to filter the CSV with, expand_members turns those back into
+    # sequence ids for the FASTA; both are the identity when members is None.
+    # train is the CD-HIT reference and loses nothing, so its keep set is itself.
+    train_node_nr = strict_survivors(set(train_seqs), set(train_seqs), members)
+    val_node_nr = strict_survivors(set(val_seqs), val_keep, members)
+    test_node_nr = strict_survivors(set(test_seqs), test_keep, members)
 
-    train_ppis_nr = filter_ppis(train_ppis, train_prot_nr)
-    val_ppis_nr = filter_ppis(val_ppis, val_prot_nr)
-    test_ppis_nr = filter_ppis(test_ppis, test_prot_nr)
+    train_ppis_nr = filter_ppis(train_ppis, train_node_nr)
+    val_ppis_nr = filter_ppis(val_ppis, val_node_nr)
+    test_ppis_nr = filter_ppis(test_ppis, test_node_nr)
 
     write_ppi_csv(train_ppis_nr, "train_nr.csv")
     write_ppi_csv(val_ppis_nr, "val_nr.csv")
     write_ppi_csv(test_ppis_nr, "test_nr.csv")
-    write_fasta(train_seqs, train_prot_nr, "train_nr.fasta")
-    write_fasta(val_seqs, val_prot_nr, "val_nr.fasta")
-    write_fasta(test_seqs, test_prot_nr, "test_nr.fasta")
+    write_fasta(train_seqs, expand_members(train_node_nr, members), "train_nr.fasta")
+    write_fasta(val_seqs, expand_members(val_node_nr, members), "val_nr.fasta")
+    write_fasta(test_seqs, expand_members(test_node_nr, members), "test_nr.fasta")
 
-    for name, ppis, prot in [
-        ("train_nr", train_ppis_nr, train_prot_nr),
-        ("val_nr", val_ppis_nr, val_prot_nr),
-        ("test_nr", test_ppis_nr, test_prot_nr),
+    for name, ppis, nodes in [
+        ("train_nr", train_ppis_nr, train_node_nr),
+        ("val_nr", val_ppis_nr, val_node_nr),
+        ("test_nr", test_ppis_nr, test_node_nr),
     ]:
-        print(f"{name}: {len(ppis)} PPIs, {len(prot)} proteins", file=sys.stderr)
+        print(f"{name}: {len(ppis)} PPIs, {len(nodes)} {node_label}", file=sys.stderr)
 
     # kahip/ilp assign every PPI to one split or discard it, so comparing input
     # total to the pre-CD-HIT split totals gives the discard count directly,
@@ -145,6 +175,7 @@ def main():
         ],
         args.id,
         n_ppis_discarded,
+        ddi=bool(members),
     )
 
 
