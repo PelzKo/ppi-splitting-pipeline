@@ -14,7 +14,7 @@ Have a look at the [Wiki](https://github.com/bionetslab/ppi-splitting-pipeline/w
 - [Nextflow](https://www.nextflow.io/) ≥ 26
 - Conda (for the environment) — or install the packages in `environment.yml` manually, or use `-profile docker` and the image built from `docker/Dockerfile`
 - Internet access for the initial UniProt fetch (subsequent runs use cached Nextflow work directories)
-- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. The wheel's CUDA major version must not exceed the driver's (minors are compatible). `environment.yml` pins `torch==2.10.0+cu128` for that reason, and `docker/Dockerfile` installs from that same file, so `-profile conda` and `-profile docker` cannot disagree about the wheel
+- A GPU is recommended but not required for `esm2` and `prot_t5` embedding models. It is required under `-profile gpu`, which turns an unusable CUDA device into an error instead of a slow CPU run. The wheel's CUDA major version must not exceed the driver's (minors are compatible). `environment.yml` pins `torch==2.14.0`, the default PyPI wheel, built for CUDA 13.0 -- so the nodes need a CUDA 13 driver. `docker/Dockerfile` installs from that same file, so `-profile conda` and `-profile docker` cannot disagree about the wheel
 - For DDI mode, internet access for the Pfam pass — one ~4.7 GB transfer plus a ~600 MB Swiss-Prot flat file per run, or none if `--pfam_regions`/`--pfam_clans`/`--uniprot_dat` point at local copies (a TrEMBL file has to be local: it is never downloaded). `--interpro_cache <abs-dir>` makes repeat runs a stat and a read (plus one small `Pfam.version` request, which `--pfam_release` removes)
 
 ---
@@ -60,8 +60,8 @@ You provide all parameters for the pipeline via a samplesheet CSV where one row 
 If you have a GPU, `-profile gpu` will submit the embedding step to a GPU, as specified by your nextflow config.
 It also makes `EMBED_SEQUENCES` **fail** rather than fall back to CPU when torch finds no usable CUDA
 device — a CPU run is roughly 60× slower and would only hit the scheduler's walltime hours later. The
-usual cause is a torch wheel built for a newer CUDA than the node's driver (`environment.yml` pins a
-cu12x build for this reason). Without `-profile gpu`, CPU is the expected device and the step just warns.
+usual cause is a torch wheel built for a newer CUDA than the node's driver (`environment.yml`'s
+`torch==2.14.0` is a CUDA 13.0 build). Without `-profile gpu`, CPU is the expected device and the step just warns.
 
 ```
 nextflow run main.nf --samplesheet samplesheet.csv --outdir results -profile gpu -c my_config.config

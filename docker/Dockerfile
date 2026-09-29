@@ -15,18 +15,19 @@ FROM mambaorg/micromamba:2.0.5
 
 USER root
 
-# procps: Nextflow's trace/`ps` polling. git: cvxpy/pip metadata on some deps.
+# procps: Nextflow's trace/`ps` polling. ca-certificates: HTTPS for the pip
+# installs below and for the UniProt/Pfam/Gurobi WLS calls tasks make.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends procps ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# The same environment.yml the conda profile uses, so the two profiles cannot
-# drift apart in what they install. torch's cu128 pin lives in environment.yml
-# itself (see the comment there) -- this is the only torch install in the
-# image now; a prior version force-reinstalled a second copy here, which left
-# both the unpinned and pinned wheels in the image (~18GB combined, since
-# Docker layers are additive and never delete what an earlier layer wrote).
-# Keep the pin in sync with the driver on the target cluster.
+# environment.yml is the only package source: every conda and pip dependency,
+# including torch and its CUDA build (the default PyPI wheel, CUDA 13.0 for
+# the pinned version -- see the comment in that file), comes from this one install. Do not
+# add packages or a separate torch/CUDA layer here -- the image must install
+# exactly what `-profile conda` installs, and a second torch layer once shipped
+# two wheels (~18GB, Docker layers never delete what an earlier one wrote).
+# To change a version, edit environment.yml and rebuild.
 ENV PIP_NO_CACHE_DIR=1
 COPY environment.yml /tmp/environment.yml
 RUN micromamba install -y -n base -f /tmp/environment.yml \
