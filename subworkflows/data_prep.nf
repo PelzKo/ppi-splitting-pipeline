@@ -11,7 +11,20 @@ workflow DATA_PREP {
     datasets_ch  // tuple(meta, files) -- reads files.ppis, .sequences, .go_annotations, .species
 
     main:
-    branched = datasets_ch.branch { meta, f ->
+    // The precomputed hatch is all-or-nothing, so a row that supplies one or two of
+    // the three files would fall into needs_fetch, drop them, and query UniProt
+    // instead -- silently, and fatally for ids UniProt does not know (Pinder's
+    // P12345:A). Fail loudly instead, the same check DATA_PREP_DDI makes.
+    checked_ch = datasets_ch.map { meta, f ->
+        def supplied = [sequences: f.sequences, go_annotations: f.go_annotations, species: f.species]
+        def missing  = supplied.findAll { k, v -> !v }.keySet()
+        if (missing && missing.size() < supplied.size()) {
+            error("Precomputed data prep needs sequences, go_annotations and species together (row '${meta.id}' supplies ${(supplied.keySet() - missing).join(', ')} but is missing ${missing.join(', ')}). Leave all three blank to fetch them from UniProt instead.")
+        }
+        tuple(meta, f)
+    }
+
+    branched = checked_ch.branch { meta, f ->
         precomputed: f.sequences && f.go_annotations && f.species
             return tuple(meta, f.sequences, f.go_annotations, f.species)
         needs_fetch: true

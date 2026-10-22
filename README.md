@@ -49,11 +49,14 @@ The column names don't change, so every downstream step reads the file the same 
 
 You provide all parameters for the pipeline via a samplesheet CSV where one row corresponds to one run. E.g., :
 
-| id        | ppis             | split_method | negative_sampling_method | neg_ilp_solver | gurobi_license     |
-|-----------|------------------|--------------|--------------------------|----------------|--------------------|
-| fast-run  | data/my_ppis.csv | kahip        | default                  |                |                    |
-| split-ilp | data/my_ppis.csv | ilp          | default                  |                |                    |
-| all-ilp   | data/my_ppis.csv | ilp          | ilp                      | gurobi         | path/to/gurobi.lic |
+| id        | ppis             | split_method | negative_sampling_method |
+|-----------|------------------|--------------|--------------------------|
+| fast-run  | data/my_ppis.csv | kahip        | default                  |
+| split-ilp | data/my_ppis.csv | ilp          | default                  |
+| all-ilp   | data/my_ppis.csv | ilp          | ilp                      |
+
+The solvers and the Gurobi license are run-wide parameters, not samplesheet columns:
+`--ilp_solver`, `--neg_ilp_solver` and `--gurobi_license path/to/gurobi.lic`.
 
 ### Run the pipeline
 
@@ -119,9 +122,11 @@ Under `--ddi_mode` the required set is the same except that `go_annotations`
 rather than proteins. `SELECT_EXAMPLES` still runs: in DDI mode the example tables
 are the deliverable.
 
-`candidate_network` remains optional, same as a normal run. `split_method`
-and `negative_sampling_method` are forced to `ilp` regardless of what the
-samplesheet says, since that's the only path this mode runs. Everything else
+`candidate_network` remains optional, same as a normal run: list
+`ilp_candidates` (alone or as `ilp,ilp_candidates`) in `negative_sampling_method`
+to use it. `split_method` is forced to `ilp`, and `negative_sampling_method` to
+`ilp` unless it names only `ilp`/`ilp_candidates`, since the ILP sampler is the
+only one this mode runs. Everything else
 (`cdhit_identity`, `ilp_epsilon`, the `neg_ilp_*` weights, `--gurobi_license`/
 `--ilp_solver`/`--neg_ilp_solver`, ...) still applies exactly as in a full run
 — see the [Wiki](https://github.com/bionetslab/ppi-splitting-pipeline/wiki) for those. The output is the same four files a full run produces —
@@ -153,6 +158,11 @@ the inputs they read. `ppis` may be left blank.
 | `go_annotations`      | `go_annotations.tsv` — not needed under `--ddi_mode` |
 | `embedding_model`     | path to a precomputed embeddings `.npz`            |
 
+A precomputed `blast_results` must use the pipeline's own column order,
+`-outfmt "6 qseqid sseqid evalue bitscore pident"`, not BLAST's default outfmt 6:
+`bias_analysis.py` reads columns by position, so a default table would be read
+without any error but with the wrong values.
+
 Under `--ddi_mode` the four split columns take the **instance-level**
 `*_instances.csv` files, which is what the bias analysis reads in a full DDI run
 too; the attribute set is the DDI one (no GO terms, plus `parent_degree`).
@@ -183,7 +193,7 @@ become DDIs.
 nextflow run main.nf --samplesheet samplesheet_ddi.csv --ddi_mode --outdir results -profile conda
 
 # smoke test on the committed list of real Pfam family pairs. The first run queries
-# Pfam live (~6.3 GB stream); the profile caches into <projectDir>/.pfam_cache, so
+# Pfam live (~4.7 GB Pfam-A.regions.tsv.gz stream plus a ~600 MB Swiss-Prot flat file); the profile caches into <projectDir>/.pfam_cache, so
 # every run after that is a stat and a read.
 nextflow run main.nf -profile test_ddi,conda
 ```

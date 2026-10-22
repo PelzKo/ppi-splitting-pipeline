@@ -5,9 +5,9 @@ Not part of the pipeline -- run by hand when the fixture needs regenerating.
 
 The fixture is a list of **real Pfam family pairs**, and nothing else: the
 test_ddi profile supplies no sequences, no species table and no instances.tsv,
-so a run exercises FETCH_DOMAIN_META for real -- the Pfam-A.fasta.gz stream, the
+so a run exercises FETCH_DOMAIN_META for real -- the Pfam-A.regions.tsv.gz stream, the
 clan table, the tier cascade and the instance sampling included. That costs a
-~6.3 GB download per cold run, which is the price of testing the fetch at all.
+~4.7 GB download (plus ~600 MB of Swiss-Prot) per cold run, which is the price of testing the fetch at all.
 
 Accessions come from Pfam's own clan table rather than from memory, so a typo or
 a dead family cannot creep in. The composition is deliberate:

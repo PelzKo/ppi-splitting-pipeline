@@ -37,7 +37,7 @@ process BIAS_ANALYSIS {
 }
 
 // id is the MultiQC display label for one (dataset, negative set), computed in
-// subworkflows/qc.nf -- not meta.id. See helpers/mqc_labels.nf.
+// subworkflows/bias_diagnostics.nf -- not meta.id. See helpers/mqc_labels.nf.
 process COLLECT_BIAS {
     tag "${id}_bias_scatter"
 

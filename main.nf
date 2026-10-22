@@ -169,7 +169,7 @@ def resolveMqcOrder(labels) {
 }
 
 // One row per PPI dataset. Anything left blank in the samplesheet falls
-// back to the corresponding default in nextflow.config, so a single run
+// back to the corresponding default in conf/params.config, so a single run
 // can process several datasets in parallel, each with its own overrides.
 def buildDatasetsChannel() {
     // samplesheetToList() returns each row as a positional list, not a map
@@ -255,7 +255,11 @@ def buildDatasetsChannel() {
             test_split               : isGiven(row.test_split)               ? row.test_split               : params.test_split,
             ilp_epsilon              : isGiven(row.ilp_epsilon)              ? row.ilp_epsilon              : params.ilp_epsilon,
             ilp_max_sec              : isGiven(row.ilp_max_sec)              ? row.ilp_max_sec              : params.ilp_max_sec,
-            negative_sampling_method : params.split_only ? "ilp" : (isGiven(row.negative_sampling_method) ? row.negative_sampling_method : params.negative_sampling_method),
+            // Under --split_only only the ILP sampler runs, so a row may keep ilp,
+            // ilp_candidates or both; anything else (or a blank cell) is forced to ilp.
+            negative_sampling_method : params.split_only
+                ? ((isGiven(row.negative_sampling_method) && row.negative_sampling_method.toString().tokenize(',')*.trim().every { n -> n in ["ilp", "ilp_candidates"] }) ? row.negative_sampling_method : "ilp")
+                : (isGiven(row.negative_sampling_method) ? row.negative_sampling_method : params.negative_sampling_method),
             neg_ilp_time_limit       : isGiven(row.neg_ilp_time_limit)       ? row.neg_ilp_time_limit       : params.neg_ilp_time_limit,
             neg_ilp_lambda_degree    : isGiven(row.neg_ilp_lambda_degree)     ? row.neg_ilp_lambda_degree     : params.neg_ilp_lambda_degree,
             neg_ilp_lambda_taxon_pair: isGiven(row.neg_ilp_lambda_taxon_pair) ? row.neg_ilp_lambda_taxon_pair : params.neg_ilp_lambda_taxon_pair,
@@ -366,8 +370,9 @@ workflow PPI_SPLITTING {
             if (missing) {
                 error("--split_only requires every dataset to supply ${required.join(', ')} (dataset '${meta.id}' is missing ${missing.join(', ')}).")
             }
-            if (meta.split_method != "ilp" || meta.negative_sampling_method != "ilp") {
-                error("--split_only runs the ILP path only, but dataset '${meta.id}' asks for split_method='${meta.split_method}', negative_sampling_method='${meta.negative_sampling_method}'. A samplesheet run gets both forced in buildDatasetsChannel(); a caller that builds meta itself must set them.")
+            def neg_names = meta.negative_sampling_method.toString().tokenize(',')*.trim().findAll { n -> n }
+            if (meta.split_method != "ilp" || !neg_names || !neg_names.every { n -> n in ["ilp", "ilp_candidates"] }) {
+                error("--split_only runs the ILP path only, but dataset '${meta.id}' asks for split_method='${meta.split_method}', negative_sampling_method='${meta.negative_sampling_method}' (allowed: ilp, ilp_candidates or both). A samplesheet run gets both forced in buildDatasetsChannel(); a caller that builds meta itself must set them.")
             }
         }
         tuple(meta, f)

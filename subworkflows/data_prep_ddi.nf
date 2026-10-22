@@ -16,7 +16,7 @@ workflow DATA_PREP_DDI {
 
     main:
     // The precomputed hatch is all-or-nothing, so a row that supplies two of the
-    // three files would fall into needs_fetch, ignore both, and stream 6.3 GB
+    // three files would fall into needs_fetch, ignore both, and stream ~4.7 GB
     // from EBI -- a correct result by a route nobody asked for, hours later and
     // silently. Fail loudly instead, wording it like main.nf's --split_only check.
     checked_ch = datasets_ch.map { meta, f ->
@@ -51,7 +51,7 @@ workflow DATA_PREP_DDI {
         .unique()
         .collectFile(name: 'families.txt', newLine: true, sort: true)
 
-    // Pfam-A.clans.tsv and Pfam-A.fasta.gz are release-wide reference files
+    // Pfam-A.clans.tsv and Pfam-A.regions.tsv.gz are release-wide reference files
     // consumed by the one shared task, so they are run-global params rather than
     // samplesheet columns -- same idiom as gurobi_license in SPLIT_POSITIVES.
     // Both are staged as path inputs, which is what gets them checkIfExists and a

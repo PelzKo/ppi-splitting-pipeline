@@ -1,4 +1,5 @@
 include { SORT_PPIS; SOLVE_ILP; SPLIT_RANDOM; CDHIT2D; REMOVE_REDUNDANT; SELECT_EXAMPLES } from '../processes/splitting'
+include { gurobiLicenseFile } from '../helpers/gurobi_license'
 
 // Assigns PPIs to train/val/test (KaHIP, ILP, or random shuffle, per
 // meta.split_method), then runs CD-HIT-2D redundancy removal for the two
@@ -26,9 +27,7 @@ workflow SPLIT_POSITIVES {
         kahip:  true
     }
 
-    gurobi_license_ch = params.gurobi_license
-        ? channel.value(file(params.gurobi_license, checkIfExists: true))
-        : channel.value([])
+    gurobi_license_ch = channel.value(gurobiLicenseFile(params.gurobi_license))
 
     ilp_out    = SOLVE_ILP(branched.ilp, gurobi_license_ch)
     kahip_out  = SORT_PPIS(branched.kahip)

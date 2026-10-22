@@ -187,7 +187,7 @@ def _open_url(url, retries=3, timeout=120):
     being wrapped, and gzip.BadGzipFile on a truncated small download is another
     OSError subclass. HTTPError and URLError are both OSError subclasses too, so
     this is a widening, not a change of intent. Note it covers the *open* only --
-    a truncation part-way through the 6.3 GB stream raises out of the caller's
+    a truncation part-way through the ~4.7 GB stream raises out of the caller's
     iteration, which is what FETCH_DOMAIN_META's 'error_retry' label is for.
     """
     req = urllib.request.Request(url, headers={"Accept-Encoding": "identity"})
