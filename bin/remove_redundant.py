@@ -69,7 +69,7 @@ def filter_ppis(rows, keep):
     return [row for row in rows if row["protein1"] in keep and row["protein2"] in keep]
 
 
-def write_mqc(split_results, id_, n_ppis_discarded, ddi=False):
+def write_mqc(split_results, id_, n_ppis_discarded, ddi=False, n_no_instance=0):
     """The sole contributor to the per-dataset "split_bar_{id_}" PPI
     Partitioning bar chart for kahip/ilp datasets (sort_ppis.py/solve_ilp.py
     contribute nothing themselves -- see their modules): train/val/test show
@@ -78,8 +78,11 @@ def write_mqc(split_results, id_, n_ppis_discarded, ddi=False):
     from the original pre-split ppis.csv) vs CD-HIT-2D redundancy removal
     (summed across val+test).
 
-    `ddi` only relabels -- the rows are Pfam family pairs rather than PPIs in
-    DDI mode. The counts and the `id` are the same either way, and
+    `ddi` relabels -- the rows are Pfam family pairs rather than PPIs in DDI
+    mode -- and adds one more discard reason, "Dropped (no instance)": a DDI with
+    a family that has no domain instance at all never reaches the partitioner, so
+    counting it as cross-partition would blame KaHIP/ILP for an instance_tiers /
+    dead-accession drop. The PPI-mode header is unchanged. The `id` is the same either way, and
     ddi_attrition.py reduces this bar plus SELECT_EXAMPLES' into the run's
     attrition waterfall by matching these column headers."""
     total_cdhit_removed = sum(r["n_ppis_removed"] for r in split_results)
@@ -91,17 +94,23 @@ def write_mqc(split_results, id_, n_ppis_discarded, ddi=False):
             f"# section_name: '{noun} Partitioning: {id_}'\n"
             f"# description: '{noun} counts per split. The discarded bar is coloured by why "
             f"a {noun} never made it into a split: cross-partition (KaHIP/ILP) or removed by "
-            "CD-HIT-2D redundancy filtering.'\n"
+            "CD-HIT-2D redundancy filtering"
+            + (", or dropped because a family has no domain instance" if ddi else "")
+            + ".'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             f"#     id: 'split_bar_plot_{id_}'\n"
             f"#     title: '{noun} Partitioning: edges per split ({id_})'\n"
             f"#     ylab: '# {noun}s'\n"
-            "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)\n"
+            "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)"
+            + ("\tDropped (no instance)" if ddi else "")
+            + "\n"
         )
+        extra = "\t0" if ddi else ""
         for r in split_results:
-            fh.write(f"{mqc_category(r['name'])}\t{r['n_ppis_nr']}\t0\t0\n")
-        fh.write(f"{mqc_category('discarded')}\t0\t{n_ppis_discarded}\t{total_cdhit_removed}\n")
+            fh.write(f"{mqc_category(r['name'])}\t{r['n_ppis_nr']}\t0\t0{extra}\n")
+        last = f"\t{n_no_instance}" if ddi else ""
+        fh.write(f"{mqc_category('discarded')}\t0\t{n_ppis_discarded}\t{total_cdhit_removed}{last}\n")
 
 
 def main():
@@ -131,7 +140,15 @@ def main():
     members = instances_by_family(read_instances(args.instances)) if args.instances else None
     node_label = "families" if members else "proteins"
 
-    n_input = len(read_ppis(args.ppis))
+    input_ppis = read_ppis(args.ppis)
+    n_input = len(input_ppis)
+    # DDI mode: SOLVE_ILP / SORT_PPIS only ever see families with an instance, so
+    # a DDI touching an instance-less family is gone before partitioning.
+    n_no_instance = (
+        sum(1 for row in input_ppis if not members.get(row["protein1"]) or not members.get(row["protein2"]))
+        if members
+        else 0
+    )
 
     train_seqs = read_fasta(args.train_fasta)
     val_seqs = read_fasta(args.val_fasta)
@@ -176,7 +193,7 @@ def main():
     # kahip/ilp assign every PPI to one split or discard it, so comparing input
     # total to the pre-CD-HIT split totals gives the discard count directly,
     # without threading it in from SORT_PPIS/SOLVE_ILP.
-    n_ppis_discarded = n_input - (len(train_ppis) + len(val_ppis) + len(test_ppis))
+    n_ppis_discarded = n_input - (len(train_ppis) + len(val_ppis) + len(test_ppis)) - n_no_instance
 
     write_mqc(
         [
@@ -199,6 +216,7 @@ def main():
         args.id,
         n_ppis_discarded,
         ddi=bool(members),
+        n_no_instance=n_no_instance,
     )
 
 

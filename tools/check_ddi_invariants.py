@@ -16,8 +16,10 @@ What is checked, per dataset:
   parents    no parent protein is used by more than one split
   vocabulary every id in the *_instances.csv files is a real instance of the
              family that row declares, and its parent is in that split's own
-             universe (or in the never-claimed reserve EXPAND_NEGATIVES may draw
-             from when a negative pair runs short)
+             universe (or in that split's own share of the never-claimed reserve,
+             examples/{split}_reserve.txt, which EXPAND_NEGATIVES may draw from
+             when a negative pair runs short; older trees without those files
+             fall back to the union unclaimed.txt)
   cap    no (family pair, label) carries more than N examples
   labels no instance pair appears as both a positive and a negative
   universes  the three protein universes are pairwise disjoint, and disjoint
@@ -186,10 +188,16 @@ def check_dataset(dataset, path, instances_path, target, leaky, negset="", files
     rep.check(True, "all four labelled instance tables present")
 
     universes, unclaimed = {}, read_ids(os.path.join(path, "examples", "unclaimed.txt"))
+    # Each split may only draw from its own share of the reserve: SELECT_EXAMPLES
+    # partitions unclaimed.txt three ways, and a parent from another split's share
+    # would put one protein in two splits.
+    reserves = {}
     for split in ("train", "val", "test"):
         ids = read_ids(os.path.join(path, "examples", f"{split}_universe.txt"))
         if ids is not None:
             universes[split] = ids
+        reserve = read_ids(os.path.join(path, "examples", f"{split}_reserve.txt"))
+        reserves[split] = reserve if reserve is not None else (unclaimed or set())
     if not universes:
         rep.note("no examples/ directory published -- universe checks skipped")
 
@@ -215,7 +223,7 @@ def check_dataset(dataset, path, instances_path, target, leaky, negset="", files
                 parent = inst_parent.get(iid, instance_parent(iid))
                 parents_by_split[split].add(parent)
                 allowed = universes.get(split)
-                if allowed is not None and parent not in allowed and parent not in (unclaimed or set()):
+                if allowed is not None and parent not in allowed and parent not in reserves[split]:
                     bad_parent.append(f"{lbl}:{parent}")
                 fam_by_split[split].add(row[fam_col])
                 if row[fam_col] in fam_clan:
@@ -230,7 +238,7 @@ def check_dataset(dataset, path, instances_path, target, leaky, negset="", files
     if universes:
         rep.check(
             not bad_parent,
-            "every parent is in its own split's universe or the unclaimed reserve",
+            "every parent is in its own split's universe or its own share of the reserve",
             f"{len(bad_parent)} outside",
         )
     rep.check(not over, f"no (family pair, label) carries more than N={target} examples", ", ".join(over[:4]))

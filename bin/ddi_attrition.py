@@ -4,15 +4,18 @@ DDI mode: one attrition waterfall per dataset, from the splitting stage's own ba
 
 Scope: "input" here means the DDIs this pipeline received in its `ppis` input,
 not the caller's full DDI universe. A caller that filtered DDIs out before
-handing them over -- by `instance_tiers`, say, which drops every DDI touching a
-family with no eligible domain instance -- must account for those itself; they
-are outside this chart entirely, and the four series below sum to what arrived.
+handing them over must account for those itself; they are outside this chart
+entirely, and the five series below sum to what arrived. A DDI that did arrive
+but touches a family with no domain instance (instance_tiers, a dead or demoted
+accession) is its own bucket, not cross-cluster.
 
-Every DDI that did arrive ends up in exactly one of four buckets, and each is
+Every DDI that did arrive ends up in exactly one of five buckets, and each is
 already counted by a MultiQC bar written upstream -- so this reduces those bars
 rather than re-deriving anything, which is what stops the waterfall and the
 per-stage charts from disagreeing:
 
+    dropped (no instance)       a family has no domain instance, so the DDI never
+                                reached the partitioner   [remove_redundant.py]
     discarded (cross-cluster)   the partitioner put the DDI's two families in
                                 different clusters   [sort_ppis.py / remove_redundant.py]
     discarded (CD-HIT-2D)       one family lost an instance to redundancy
@@ -27,7 +30,7 @@ per-stage charts from disagreeing:
 The two source bars are identified by their column headers rather than their
 filenames, so this keeps working if a splitter's output file is renamed:
 
-    Sample  Kept  Discarded (KaHIP/ILP)  Discarded (CD-HIT-2D)   <- partitioning
+    Sample  Kept  Discarded (KaHIP/ILP)  Discarded (CD-HIT-2D)  [Dropped (no instance)]   <- partitioning
     Sample  Full N examples  Partial  Dropped (0 examples)       <- example selection
 
 Input
@@ -116,6 +119,9 @@ def collect(paths):
     after_split = column(header, split_rows(rows), "Kept")
     cross = column(header, rows, _PARTITION_MARKER)
     cdhit = column(header, rows, "Discarded (CD-HIT-2D)")
+    # Absent from split_method=random's bar: random keeps such DDIs, and
+    # SELECT_EXAMPLES then drops them as "no example".
+    no_instance = column(header, rows, "Dropped (no instance)")
 
     if selection is None:
         # split_method=random reaches SELECT_EXAMPLES too, so this should not
@@ -131,6 +137,7 @@ def collect(paths):
 
     return {
         "kept": after_split - dropped,
+        "no_instance": no_instance,
         "cross": cross,
         "cdhit": cdhit,
         "dropped": dropped,
@@ -147,22 +154,25 @@ def write_mqc(stats, id_):
             "# id: 'ddi_attrition'\n"
             "# section_name: 'DDI Attrition (within splitting)'\n"
             "# description: 'Where every DDI went inside the splitting stage, one bar per "
-            "dataset. Discarded cross-cluster means the partitioner put the two Pfam families "
+            "dataset. Dropped (no instance) means a family has no domain instance, so the DDI "
+            "never reached the partitioner. Discarded cross-cluster means the partitioner put the two Pfam families "
             "in different clusters; discarded by CD-HIT-2D means a family lost an instance to "
             "redundancy filtering; dropped (no example) means the DDI survived splitting but "
             "reached zero domain-instance examples, because another split already had its "
-            "parent proteins or the family had no usable instance. The four series sum to the "
+            "parent proteins or the family had no usable instance. The five series sum to the "
             "DDIs this pipeline received in its ppis input -- DDIs the caller filtered out "
-            "before handing them over, for example by instance_tiers, are outside this chart "
-            "and must be accounted for by the caller.'\n"
+            "before handing them over are outside this chart and must be accounted for by the "
+            "caller.'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             "#     id: 'ddi_attrition_plot'\n"
             "#     title: 'DDI Attrition: where the input DDIs went'\n"
             "#     ylab: '# DDIs'\n"
-            "Sample\tKept\tDiscarded (cross-cluster)\tDiscarded (CD-HIT-2D)\tDropped (no example)\n"
+            "Sample\tKept\tDropped (no instance)\tDiscarded (cross-cluster)\tDiscarded (CD-HIT-2D)"
+            "\tDropped (no example)\n"
             # mqc_dataset(): one row per dataset, no split component.
-            f"{mqc_dataset(id_)}\t{stats['kept']}\t{stats['cross']}\t{stats['cdhit']}\t{stats['dropped']}\n"
+            f"{mqc_dataset(id_)}\t{stats['kept']}\t{stats['no_instance']}\t{stats['cross']}\t{stats['cdhit']}"
+            f"\t{stats['dropped']}\n"
         )
 
 
@@ -173,10 +183,11 @@ def main():
     args = ap.parse_args()
 
     stats, (after_split, had_selection) = collect(args.tsvs)
-    total = stats["kept"] + stats["cross"] + stats["cdhit"] + stats["dropped"]
+    total = stats["kept"] + stats["no_instance"] + stats["cross"] + stats["cdhit"] + stats["dropped"]
 
     print(
-        f"{total} input DDIs: {stats['cross']} cross-cluster, {stats['cdhit']} CD-HIT-2D, "
+        f"{total} input DDIs: {stats['no_instance']} no instance, {stats['cross']} cross-cluster, "
+        f"{stats['cdhit']} CD-HIT-2D, "
         f"{stats['dropped']} no example, {stats['kept']} kept",
         file=sys.stderr,
     )

@@ -15,10 +15,19 @@ done
 comm -23 "$T/A" "$T/B" | sed 's|^\./|ONLY IN A     |'
 comm -13 "$T/A" "$T/B" | sed 's|^\./|ONLY IN B     |'
 
+# One line per FASTA record (">id<TAB>sequence"), so sorting keeps each header
+# with its own sequence -- sorting raw lines would compare a re-paired file equal.
+records() {
+    awk '/^>/ { if (h != "") print h "\t" s; h = $0; s = ""; next } { s = s $0 } END { if (h != "") print h "\t" s }' "$1"
+}
+
 same=0; differ=0
 while IFS= read -r f; do
     case "$f" in
-        *.csv|*.tsv|*.txt|*.fasta|*.graph|*.json|*.yml)
+        *.fasta)
+            if [ "$(records "$A/$f" | sort | md5sum)" = "$(records "$B/$f" | sort | md5sum)" ]
+                then same=$((same+1)); else printf 'DIFF          %s\n' "${f#./}"; differ=$((differ+1)); fi ;;
+        *.csv|*.tsv|*.txt|*.graph|*.json|*.yml)
             if [ "$(sort -- "$A/$f" | md5sum)" = "$(sort -- "$B/$f" | md5sum)" ]
                 then same=$((same+1)); else printf 'DIFF          %s\n' "${f#./}"; differ=$((differ+1)); fi ;;
         *)
