@@ -209,6 +209,12 @@ def solve_ilp(clusters_list, intra_ppi, cross_ppi, splits, names, epsilon, max_s
     if problem.status not in cp.settings.SOLUTION_PRESENT:
         print(f"Solver status: {problem.status}", file=sys.stderr)
         return None
+    # USER_LIMIT counts as SOLUTION_PRESENT, but a time limit hit before the first
+    # incumbent leaves every variable unset. Returning the empty assignment below
+    # would exit 0 with three empty splits and fail far downstream instead of here.
+    if x.value is None:
+        print(f"Solver status: {problem.status}, but no incumbent was found within the time limit.", file=sys.stderr)
+        return None
 
     if problem.status == cp.settings.USER_LIMIT:
         print(

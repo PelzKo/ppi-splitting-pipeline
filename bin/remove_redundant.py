@@ -42,6 +42,29 @@ def fasta_ids(path):
     return ids
 
 
+# cd-hit-2d's default -l: it throws away db2 sequences this short or shorter
+# without comparing them, so they never reach its output file.
+CDHIT_THROW_AWAY_LEN = 10
+
+
+def cdhit_keep(cdhit_out, query_seqs, reference_seqs):
+    """Sequence ids of query_seqs that CD-HIT-2D did not find redundant with reference_seqs.
+
+    Two cases where the output file's id set is not that answer:
+      - an empty reference: CDHIT2D's guard skips cd-hit-2d and touches an empty
+        cdhit.out, which would read as "every query sequence is redundant" and wipe
+        the whole val/test split (train_split = 0 is permitted). Nothing to compare
+        against means nothing is redundant.
+      - query sequences cd-hit-2d threw away for length (CDHIT_THROW_AWAY_LEN): they
+        were never compared, so they are kept rather than counted as redundant --
+        in DDI mode one short region would otherwise drop its whole family."""
+    if not reference_seqs:
+        return set(query_seqs)
+    keep = fasta_ids(cdhit_out)
+    keep.update(sid for sid, seq in query_seqs.items() if len(seq) <= CDHIT_THROW_AWAY_LEN)
+    return keep
+
+
 def filter_ppis(rows, keep):
     return [row for row in rows if row["protein1"] in keep and row["protein2"] in keep]
 
@@ -119,8 +142,8 @@ def main():
     test_ppis = read_ppis(args.test_ppis)
 
     # IDs to keep (sequences in CD-HIT-2D output = NOT similar to the reference)
-    val_keep = fasta_ids(args.sim_train_val)
-    test_keep = fasta_ids(args.sim_train_test)
+    val_keep = cdhit_keep(args.sim_train_val, val_seqs, train_seqs)
+    test_keep = cdhit_keep(args.sim_train_test, test_seqs, train_seqs)
 
     # Two vocabularies that coincide in PPI mode and diverge in DDI mode: the
     # CSVs are keyed by node (protein / Pfam family), the FASTAs and CD-HIT's

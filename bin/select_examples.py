@@ -31,8 +31,9 @@ Three reductions keep that ILP small, none of them an approximation:
     It is what makes the target scale (~90k surviving DDIs, so millions of
     variables in one model) tractable at all.
   * A per-DDI shortlist caps the candidate pool at K = shortlist_factor * N. At
-    the default pool size (M = N = 5, so 25 candidates) it trims almost nothing
-    and exists as a guard for a larger --ddi_examples_pool_factor.
+    the defaults (N = 5, pool factor 5 so M = 25 instances per family, so up to
+    M * M = 625 candidate pairs per DDI, and K = 20) it trims about 97 % of them;
+    even at pool factor 1 (25 pairs) it already trims some.
 
 Within a component the objective is lexicographic, solved as one bounded stage
 per level, so every coefficient stays 1 or lambda rather than a constant large
@@ -254,12 +255,24 @@ def _run_stage(problem, label, secs, ctx):
 
     ctx.stages += 1
     try:
-        problem.solve(**kwargs, **ctx.env.kwargs())
-    except Exception as exc:
-        if not ctx.env.kwargs():
-            raise
-        ctx.env.disable(exc)
-        problem.solve(**kwargs)
+        try:
+            problem.solve(**kwargs, **ctx.env.kwargs())
+        except Exception as exc:
+            if not ctx.env.kwargs():
+                raise
+            ctx.env.disable(exc)
+            problem.solve(**kwargs)
+    except cp.error.SolverError as exc:
+        # cvxpy raises rather than setting a status when the solver hands back
+        # nothing usable (e.g. a time limit hit before the first incumbent). That
+        # is the same situation as the no-solution status below, so it takes the
+        # same greedy fallback instead of failing the whole task.
+        _warn_once(
+            f"Warning: stage '{label}' raised {type(exc).__name__} ({exc}) at a {secs:.0f}s limit; that "
+            f"component falls back to the greedy.",
+            key=f"solvererror:{label}",
+        )
+        return None
 
     if problem.status not in cp.settings.SOLUTION_PRESENT:
         _warn_once(
@@ -1007,9 +1020,11 @@ def main():
     # takes it from none. Each reserve protein goes to exactly one split, weighted
     # by the DDIs that split actually kept -- see partition_reserve().
     #
-    # It is all but inert at --examples-pool-factor 1 (M = N). A reserve parent is
-    # only usable downstream if one of its instances is also in the target split's
-    # FASTA, and every instance in that FASTA already has its parent recorded in
+    # It is nearly inert at --examples-pool-factor 1 (M = N), though not fully:
+    # splits_of is built from the *shortlisted* candidates, and K = 20 < M * M = 25
+    # at the defaults, so a parent reached only by trimmed pairs lands here too.
+    # Otherwise, a reserve parent is only usable downstream if one of its
+    # instances is also in the target split's FASTA, and every instance in that FASTA already has its parent recorded in
     # splits_of: the instance's family is in the split CSV, and pair_candidates()
     # enumerates the full cross product of both families' available instances, so
     # every available instance of every family in the split turns up in some
