@@ -2,15 +2,15 @@
 %%metro track_gap: 1
 %%metro mode: light
 %%metro style: seqera
-%%metro line: pos_random_neg_random | Maximally biased | #ffb000
 %%metro line: pos_kahip_neg_random | Similarity-reduced | #fe6100
-%%metro line: pos_ilp_neg_random | ILP split | #dc267f
 %%metro line: pos_ilp_neg_ilp | ILP split + ILP sampling | #785ef0
 %%metro line: ddi | Domain Mode | #648fff
+%%metro line: pos_random_neg_random | Maximally biased | #ffb000
+%%metro line: pos_ilp_neg_random | ILP split | #dc267f
 %%metro grid: data_prep | 0,0
 %%metro grid: clustering | 1,0
 %%metro grid: split_positives | 2,0
-%%metro grid: sample_negatives | 3,0
+%%metro grid: sample_negatives | 0,1
 %%metro grid: train_baseline | 1,1
 %%metro grid: qc | 2,1
 
@@ -126,5 +126,8 @@ graph LR
     expand_negatives -->|ddi| embed_sequences
     embed_sequences -->|ddi| bias_analysis
 
+    %% The %%metro line order at the top is load-bearing, not the legend order you would pick: it sets
+    %% the track order, and only some orders survive the row wrap into Sample Negatives (most abort
+    %% with a "bundle order" error). This one also puts Expand Negatives level with the degree sampler.
     %% Rendered with nf-metro 2.1.0 (--diamond-style has no directive, so it goes on the CLI):
     %%   nf-metro render source_metromap --diamond-style symmetric -o metro_map.svg -o metro_map.png
