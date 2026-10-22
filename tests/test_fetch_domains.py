@@ -56,8 +56,10 @@ from fetch_domains import (  # noqa: E402
     INSTANCE_COLUMNS,
     TIERS,
     check_universe_covers,
+    crc64,
     eligible_taxa,
     load_universe,
+    sample_instances,
     parse_tiers,
     parse_uniprot_dat,
     tier_of,
@@ -101,6 +103,10 @@ REGIONS = [
     # PF00010 has nothing else, so the family drops with the new reason.
     ("S33333", "PF00010", 1, 12, 2, 11),
     ("P66666", "PF00004", 900, 999, 901, 990),  # coordinates past the sequence end
+    # PF00011's only region fits its parent, but Pfam's crc64 for it is not the
+    # UniProt sequence's: the sequence was revised under the same accession, so
+    # the coordinates would cut the domain at shifted boundaries.
+    ("P12121", "PF00011", 1, 10, 1, 10),
 ] + [
     # PF00005 is the repeat-domain shape that motivates the per-parent cap: one
     # protein carrying ten copies of the family, another carrying one. A plain
@@ -125,7 +131,13 @@ PROTEINS = {
     "P66666": ("9606", True, "W" * 40),
     "P77777": ("9606", True, "R" * 40),
     "P88888": ("9606", True, "S" * 40),
+    "P12121": ("9606", True, "T" * 40),
 }
+
+# Regions whose Pfam crc64 is written deliberately wrong; every other known parent
+# gets its real CRC64, and a parent outside PROTEINS a placeholder that is not
+# checked at all.
+CRC_MISMATCH = {"P12121"}
 
 # accession -> its secondary accessions, i.e. names UniProt has demoted into this
 # entry. P11111 carries two, which is what makes "everything after the first
@@ -138,6 +150,7 @@ SECONDARY = {
 FAMILIES = [
     "PF00001", "PF00002", "PF00003", "PF00004", "PF00005",
     "PF00006", "PF00007", "PF00008", "PF00009", "PF00010",
+    "PF00011",
 ]
 
 # What a *human-only* --tiers run may keep, whatever else changes around it.
@@ -177,7 +190,10 @@ def write_fixtures(tmp):
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(REGIONS_HEADER)
         for acc, fam, s_start, s_end, a_start, a_end in REGIONS:
-            w.writerow([acc, "1", "CRC", "MD5", fam, s_start, s_end, a_start, a_end])
+            crc = crc64(PROTEINS[acc][2]) if acc in PROTEINS else "CRC"
+            if acc in CRC_MISMATCH:
+                crc = "0000000000000000"
+            w.writerow([acc, "1", crc, "MD5", fam, s_start, s_end, a_start, a_end])
 
     dat = write_dat(os.path.join(tmp, "uniprot.dat.gz"), PROTEINS)
 
@@ -247,6 +263,13 @@ def test_unit_helpers():
     assert eligible_taxa(parse_tiers("human_reviewed,human_unreviewed")) == {"9606"}
     assert eligible_taxa(parse_tiers("human_reviewed,other_reviewed")) is None
     assert eligible_taxa(parse_tiers(ALL_TIERS)) is None
+
+    # UniProt's own SQ-line checksum for Q6GZX4 (the first Swiss-Prot entry).
+    assert crc64(
+        "MAFSAEDVLKEYDRRRRMEALLLSLYYPNDRKLLDYKEWSPPRVQVECPKAPVEWNNPPSEKGLIVGHFSGIKYKGEKAQASEVDVNKMCCWVSKFKDAMRRY"
+        "QGIQTCKIPGKVLSDLDAKIKAYNLTVEGVEGFVRYSRVTKQHVAAFLKELRHSKQYENVNLIHYILTDKRVDIQHLEKDLVKDFKALVESAHRMRQGHMINV"
+        "KYILYQLLKKHGHGPDGPDILTVKTGSKGVLYDDSFRKIYTDLGWKFTPL"
+    ) == "B4840739BF7D4121"
 
     assert parse_tiers("human_reviewed") == frozenset({0})
     # Names, not indices, and the order they are named in does not matter.
@@ -390,10 +413,12 @@ def test_formats_and_coordinates():
 
         # dropped_families.tsv is always written and its reasons are load-bearing
         # downstream. PF00009's only parent is outside the universe; PF00004's only
-        # region is out of range.
+        # region is out of range and PF00011's has the wrong CRC64 -- both facts
+        # about the sequence, not about --tiers.
         dropped = read_dropped(out)
-        assert set(dropped) == {"PF00004", "PF00009", "PF00010"}, dropped
-        assert dropped["PF00004"] == "no_eligible_instances", dropped
+        assert set(dropped) == {"PF00004", "PF00009", "PF00010", "PF00011"}, dropped
+        assert dropped["PF00004"] == "sequence_mismatch", dropped
+        assert dropped["PF00011"] == "sequence_mismatch", dropped
         # PF00009's parent is unknown to the flat files; PF00010's is known, under a
         # primary accession this region's name was demoted into. Different facts, and
         # only the second one is a region genuinely lost to a release skew -- reported
@@ -416,6 +441,7 @@ def test_formats_and_coordinates():
 
         assert "region rows skipped" in log, log
         assert "coordinates fall outside" in log, log
+        assert "revised sequence" in log, log
         # The demoted count is on stderr next to the not_in_universe one, so it is
         # visible in .command.err without opening the TSV.
         assert "secondary" in log and "demoted" in log, log
@@ -546,8 +572,25 @@ def test_a_repeat_domain_family_is_not_filled_from_one_protein():
         assert parents == {"P77777": 1, "P88888": 1}, parents
 
 
+def test_a_rejected_region_never_evicts_a_sampled_one():
+    # Pool size 1 and two regions of one family: a good one, then one whose
+    # coordinates run past its parent. The bad row used to win the reservoir slot
+    # on about half the seeds and then blank it, dropping the family outright.
+    stream = [
+        "\t".join(["pfamA_acc", "pfamseq_acc", "ali_start", "ali_end"]),
+        "\t".join(["PF09999", "A00001", "1", "10"]),
+        "\t".join(["PF09999", "B00002", "5", "500"]),
+    ]
+    universe = {"A00001": ("9606", "M" * 40, True), "B00002": ("9606", "K" * 40, True)}
+    for seed in range(40):
+        by_family, stats, _seen, _fs = sample_instances(iter(stream), {"PF09999"}, 1, universe, seed)
+        assert [r["protein_id"] for r in by_family.get("PF09999", [])] == ["A00001"], (seed, by_family)
+        assert stats["coords_out_of_range"] == 1
+
+
 if __name__ == "__main__":
     test_unit_helpers()
+    test_a_rejected_region_never_evicts_a_sampled_one()
     test_formats_and_coordinates()
     test_reviewed_outranks_human_when_filling()
     test_human_reviewed_is_a_subset_and_keeps_the_same_instances()

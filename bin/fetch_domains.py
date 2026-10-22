@@ -92,8 +92,7 @@ PFAM_CLANS_URL = f"{PFAM_BASE}/Pfam-A.clans.tsv.gz"
 PFAM_DEAD_URL = f"{PFAM_BASE}/Pfam-A.dead.gz"
 PFAM_VERSION_URL = f"{PFAM_BASE}/Pfam.version.gz"
 SPROT_URL = (
-    "https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/"
-    "complete/uniprot_sprot.dat.gz"
+    "https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/" "complete/uniprot_sprot.dat.gz"
 )
 
 # Bumped whenever the sampling or output format changes, so a cache written by
@@ -104,7 +103,10 @@ SPROT_URL = (
 # renamed, which redraws every family's sample at the same --seed (the tier name
 # namespaces each reservoir's RNG, see Reservoir), and source_db became the real
 # per-instance review flag rather than the constant "reviewed" it used to be.
-FORMAT_VERSION = 3
+# 4: regions whose CRC64 or coordinates disagree with the UniProt sequence are
+# rejected before they reach a reservoir (they used to evict an already-sampled
+# instance), so the same key inputs can now sample a different instance set.
+FORMAT_VERSION = 4
 
 # The columns Pfam-A.regions.tsv.gz is read by name, not by position: the file has
 # gained columns before (ali_start/ali_end are newer than seq_start/seq_end) and a
@@ -114,6 +116,13 @@ REGIONS_PROTEIN_COL = "pfamseq_acc"
 REGIONS_START_COL = "ali_start"
 REGIONS_END_COL = "ali_end"
 REGIONS_REQUIRED = (REGIONS_FAMILY_COL, REGIONS_PROTEIN_COL, REGIONS_START_COL, REGIONS_END_COL)
+# Optional: the checksum of the sequence Pfam's coordinates refer to. Compared with
+# the UniProt sequence's own CRC64 when present, see sample_instances.
+REGIONS_CRC64_COL = "crc64"
+CRC64_RE = re.compile(r"^[0-9A-Fa-f]{16}$")
+# Below this many checked regions an all-mismatch result is not evidence of a
+# format problem, just a small run.
+CRC64_SANITY_MIN = 100
 
 HUMAN_TAXON = "9606"
 
@@ -169,6 +178,8 @@ DROPPED_FAMILIES_COLUMNS = ("family", "reason")
 DROP_REASONS = {
     "no_eligible_instances": "have Pfam records but none in a stratum --tiers names",
     "demoted_accession": "have Pfam records, but every one names an accession UniProt has demoted to secondary",
+    "sequence_mismatch": "have eligible Pfam records, but every one disagrees with the UniProt sequence "
+    "(CRC64 differs or coordinates fall outside it)",
     "dead": "are dead in Pfam",
     "not_in_pfam": "have no regions in Pfam-A.regions and are not listed as dead",
 }
@@ -329,9 +340,7 @@ def parse_uniprot_dat(stream, taxa=None, into=None, secondary=None):
             fields = line.split()
             token = fields[2] if len(fields) > 2 else ""
             if token not in DAT_REVIEW_TOKENS:
-                raise RuntimeError(
-                    f"UniProt ID line carries neither Reviewed; nor Unreviewed;: {line.rstrip()!r}"
-                )
+                raise RuntimeError(f"UniProt ID line carries neither Reviewed; nor Unreviewed;: {line.rstrip()!r}")
             reviewed = DAT_REVIEW_TOKENS[token]
         elif line.startswith("AC   "):
             accessions.extend(a.strip() for a in line[5:].split(";") if a.strip())
@@ -493,6 +502,30 @@ class Reservoir:
         return j if j < self.k else None
 
 
+_CRC64_POLY = 0xD800000000000000  # ISO 3309, reflected -- what UniProt and Pfam both use
+
+
+def _crc64_table():
+    table = []
+    for i in range(256):
+        crc = i
+        for _ in range(8):
+            crc = (crc >> 1) ^ _CRC64_POLY if crc & 1 else crc >> 1
+        table.append(crc)
+    return table
+
+
+_CRC64_TABLE = _crc64_table()
+
+
+def crc64(sequence):
+    """UniProt's CRC64 of a sequence, as the 16-digit uppercase hex on its SQ line."""
+    crc = 0
+    for byte in sequence.encode("ascii", "replace"):
+        crc = _CRC64_TABLE[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+    return f"{crc:016X}"
+
+
 def tier_of(taxon_id, reviewed):
     """Classify one instance into a disjoint tier index (0 = most preferred).
 
@@ -539,11 +572,21 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
     is worth reporting, which is why the two are counted apart -- both globally and
     per family, in `family_stats`.
 
-    `family_stats` is {"demoted": Counter, "eligible_tier": Counter} keyed by family.
-    classify_dropped needs both: `seen_families` is populated *before* the universe
-    lookup, so a family whose every region names a demoted accession would otherwise
-    be reported as `no_eligible_instances` -- blaming --tiers for something --tiers
-    did not do.
+    `family_stats` is {"demoted": Counter, "mismatch": Counter, "eligible_tier":
+    Counter} keyed by family. classify_dropped needs all three: `seen_families` is
+    populated *before* the universe lookup, so a family whose every region names a
+    demoted accession -- or disagrees with the UniProt sequence -- would otherwise be
+    reported as `no_eligible_instances`, blaming --tiers for something --tiers did
+    not do. `eligible_tier` therefore counts only regions that also passed the
+    sequence checks.
+
+    Those checks run before the per-parent cap and before the reservoir: a region is
+    rejected if its coordinates are not integers, fall outside the parent, or slice
+    an empty sequence, or if Pfam's crc64 for it differs from the CRC64 of the
+    UniProt sequence. The last one is what catches a sequence UniProt revised under
+    the same primary accession -- the coordinates would still fit, and cut the
+    domain at shifted boundaries. Checking after offer() instead used to blank the
+    slot, evicting an instance that had already been sampled there.
 
     Unlike the Pfam-A.fasta pass this replaces, a record is complete at its own row:
     the sequence is sliced out of the parent rather than accumulated over following
@@ -567,10 +610,12 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
     parent_cap = max(1, pool_size // PARENT_CAP_DIVISOR)
     parent_offers = defaultdict(Counter)
     stats = Counter()
-    family_stats = {"demoted": Counter(), "eligible_tier": Counter()}
+    family_stats = {"demoted": Counter(), "mismatch": Counter(), "eligible_tier": Counter()}
+    parent_crc = {}
     seen_families = set()
     last_family = None
     columns = None
+    crc_col = None
 
     for raw in stream:
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
@@ -584,10 +629,8 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
             columns = {name: i for i, name in enumerate(f.strip() for f in fields)}
             missing = [c for c in REGIONS_REQUIRED if c not in columns]
             if missing:
-                raise RuntimeError(
-                    f"Pfam-A.regions is missing column(s) {', '.join(missing)}; "
-                    f"header was {fields}"
-                )
+                raise RuntimeError(f"Pfam-A.regions is missing column(s) {', '.join(missing)}; " f"header was {fields}")
+            crc_col = columns.get(REGIONS_CRC64_COL)
             continue
 
         stats["records"] += 1
@@ -623,6 +666,32 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
         if tier not in eligible:
             stats["ineligible_tier_records"] += 1
             continue
+
+        start_s, end_s = fields[columns[REGIONS_START_COL]].strip(), fields[columns[REGIONS_END_COL]].strip()
+        try:
+            start_i, end_i = int(start_s), int(end_s)
+        except ValueError:
+            stats["malformed_rows"] += 1
+            continue
+        # 1-based inclusive, which is what instance_id, instances.tsv's start/end
+        # and domainsplit's start_pos/end_pos all mean.
+        if start_i < 1 or end_i > len(parent) or end_i < start_i:
+            stats["coords_out_of_range"] += 1
+            family_stats["mismatch"][family] += 1
+            continue
+        if crc_col is not None and crc_col < len(fields) and CRC64_RE.match(want := fields[crc_col].strip()):
+            stats["crc64_checked"] += 1
+            have = parent_crc.get(accession)
+            if have is None:
+                have = parent_crc[accession] = crc64(parent)
+            if have != want.upper():
+                stats["crc64_mismatch"] += 1
+                family_stats["mismatch"][family] += 1
+                continue
+        sequence = parent[start_i - 1 : end_i]
+        if not sequence:
+            stats["empty_sequence"] += 1
+            continue
         family_stats["eligible_tier"][family] += 1
 
         key = (family, tier)
@@ -631,6 +700,7 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
         # unbiased across parents; within a parent it keeps that parent's first
         # `cap` regions, which is a positional bias deliberately traded for the
         # guarantee that `cap` parents' worth of regions cannot be crowded out.
+        # Only rows that passed the checks above count against it.
         offered = parent_offers[key]
         if offered[accession] >= parent_cap:
             stats["parent_cap_skipped"] += 1
@@ -642,25 +712,6 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
             res = reservoirs[key] = Reservoir(pool_size, seed, family, TIERS[tier])
         slot = res.offer()
         if slot is None:
-            continue
-
-        start_s, end_s = fields[columns[REGIONS_START_COL]].strip(), fields[columns[REGIONS_END_COL]].strip()
-        try:
-            start_i, end_i = int(start_s), int(end_s)
-        except ValueError:
-            stats["malformed_rows"] += 1
-            res.buf[slot] = None
-            continue
-        # 1-based inclusive, which is what instance_id, instances.tsv's start/end
-        # and domainsplit's start_pos/end_pos all mean.
-        if start_i < 1 or end_i > len(parent) or end_i < start_i:
-            stats["coords_out_of_range"] += 1
-            res.buf[slot] = None
-            continue
-        sequence = parent[start_i - 1 : end_i]
-        if not sequence:
-            stats["empty_sequence"] += 1
-            res.buf[slot] = None
             continue
 
         res.buf[slot] = {
@@ -677,6 +728,13 @@ def sample_instances(stream, wanted, pool_size, universe, seed, eligible=None, s
 
     if columns is None:
         raise RuntimeError("Pfam-A.regions stream was empty -- not even a header row")
+    if stats["crc64_checked"] >= CRC64_SANITY_MIN and stats["crc64_mismatch"] == stats["crc64_checked"]:
+        # Every checksum disagreeing is not a release skew, it is a format change:
+        # refuse to report it as tens of thousands of sequence_mismatch families.
+        raise RuntimeError(
+            f"all {stats['crc64_checked']:,} Pfam crc64 values disagree with the UniProt sequences' CRC64 "
+            "-- has the regions file's crc64 column changed format?"
+        )
 
     # Fill each family from tier 0 upward until pool_size, and fill *freely*
     # rather than as a top-up: a family with 3 human_reviewed regions and room for
@@ -788,7 +846,7 @@ def write_instances_tsv(path, by_family, clans):
 def classify_dropped(families, by_family, seen_families, dead, family_stats):
     """Return [(family, reason)] for every requested family that kept no instance.
 
-    Four distinct causes, and conflating them would hide the one that is a
+    Five distinct causes, and conflating them would hide the one that is a
     configuration choice rather than a fact about Pfam: a family absent from the
     stream is dead or mistyped, while a family *present* in the stream with
     nothing in an eligible tier is --tiers doing exactly what it was asked to.
@@ -802,12 +860,15 @@ def classify_dropped(families, by_family, seen_families, dead, family_stats):
     *and* no region of it ever reached an eligible tier.
     """
     demoted, eligible = family_stats["demoted"], family_stats["eligible_tier"]
+    mismatch = family_stats.get("mismatch", {})
     dropped = []
     for family in sorted(families):
         if family in by_family:
             continue
         if demoted.get(family) and not eligible.get(family):
             dropped.append((family, "demoted_accession"))
+        elif mismatch.get(family) and not eligible.get(family):
+            dropped.append((family, "sequence_mismatch"))
         elif family in seen_families:
             dropped.append((family, "no_eligible_instances"))
         elif family in dead:
@@ -910,7 +971,7 @@ def content_digest(items):
     return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()
 
 
-def derived_key(release, families, pool_size, seed, universe_digest, tiers):
+def derived_key(release, families, pool_size, seed, universe_digest, tiers, clans_digest):
     """Hash every input that can change the cached instance set or its columns.
 
     `tiers` is the sorted tier-name list, joined by ",". It is in here for the
@@ -930,6 +991,10 @@ def derived_key(release, families, pool_size, seed, universe_digest, tiers):
     disagree silently under one key. That set is the *primary* accessions, one per
     entry, so it moved once when the primary-only rule landed -- every pre-existing
     entry is cold, correctly: the universe genuinely changed.
+
+    `clans_digest` covers the family -> clan mapping of the requested families. The
+    cached instances.tsv carries the clan column already filled in, so without it a
+    different --clans file under the same release string got the old clans back.
     """
     payload = "|".join(
         [
@@ -939,6 +1004,7 @@ def derived_key(release, families, pool_size, seed, universe_digest, tiers):
             str(seed),
             tiers,
             universe_digest,
+            clans_digest,
             ",".join(sorted(families)),
         ]
     )
@@ -1032,6 +1098,12 @@ def main():
         file=sys.stderr,
     )
 
+    if args.pfam_regions and not args.pfam_release:
+        print(
+            "Warning: --pfam-regions is a local copy but --pfam-release is not set, so the release (and the "
+            "cache folder) comes from EBI's current_release, which may not be the release that copy is from.",
+            file=sys.stderr,
+        )
     release = args.pfam_release or parse_release(download_text(PFAM_VERSION_URL, gzipped=True))
     print(f"Pfam release {release}", file=sys.stderr)
     cache = Cache(args.interpro_cache, release)
@@ -1059,8 +1131,7 @@ def main():
             download_to_file(SPROT_URL, cached_dat)
         dat_paths = [cached_dat]
         print(
-            "No --uniprot-dat given: falling back to Swiss-Prot, which can only fill "
-            f"{TIERS[0]} and {TIERS[1]}",
+            "No --uniprot-dat given: falling back to Swiss-Prot, which can only fill " f"{TIERS[0]} and {TIERS[1]}",
             file=sys.stderr,
         )
     print(f"Reading the protein universe from {len(dat_paths)} flat file(s)...", file=sys.stderr)
@@ -1083,6 +1154,7 @@ def main():
         args.seed,
         content_digest(universe),
         ",".join(sorted(tier_names)),
+        content_digest(f"{f}\t{clans.get(f, '')}" for f in families),
     )
     cached_instances = cache.path(f"instances-{key}.tsv")
     cached_sequences = cache.path(f"sequences-{key}.fasta")
@@ -1181,6 +1253,7 @@ def main():
         for label, message in (
             ("malformed_rows", "region rows with missing or non-numeric fields"),
             ("coords_out_of_range", "regions whose coordinates fall outside the parent sequence"),
+            ("crc64_mismatch", "regions whose Pfam crc64 differs from the UniProt sequence (revised sequence)"),
             ("empty_sequence", "sampled instances with an empty sequence"),
             ("noncontiguous_blocks", "families whose block was re-entered (file not contiguous)"),
         ):
