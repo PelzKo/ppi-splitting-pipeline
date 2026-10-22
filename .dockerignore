@@ -1,0 +1,10 @@
+# The images COPY only environment.yml and bin/ (see docker/Dockerfile), so keep
+# byte-code and run artefacts out of the build context -- a stray bin/**/__pycache__
+# would otherwise be baked into /opt/ppi-splitting/bin.
+**/__pycache__
+**/*.py[cod]
+work/
+results/
+data/
+.nextflow*
+.pfam_cache/

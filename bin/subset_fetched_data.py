@@ -5,6 +5,12 @@ Used after a single UniProt fetch covering the union of several PPI datasets'
 proteins, so BLAST (whose background/E-value statistics depend on exactly
 which proteins are in the search database) and per-dataset diagnostics like
 the same_species bias check still see only this dataset's own protein set.
+
+With --instances it does the same job for DDI mode's shared FETCH_DOMAIN_META
+batch. There the interaction CSV's two id columns hold Pfam *families* while
+sequences and lengths are keyed by domain *instance*, so the keep-set cannot
+come from the CSV alone -- it is derived through instances.tsv instead.
+Without the flag every code path below is the PPI one, unchanged.
 """
 
 import argparse
@@ -13,7 +19,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import read_fasta, read_ppis, write_fasta
+from utils import INSTANCE_COLUMNS, read_fasta, read_instances, read_ppis, write_fasta
 
 
 def get_protein_ids(ppis_path):
@@ -34,6 +40,14 @@ def filter_tsv(in_path, out_path, keep_ids, id_col="protein_id"):
                 writer.writerow(row)
 
 
+def write_instances(rows, path):
+    with open(path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow(INSTANCE_COLUMNS)
+        for row in rows:
+            writer.writerow([row[c] for c in INSTANCE_COLUMNS])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ppis", required=True)
@@ -45,25 +59,59 @@ def main():
     ap.add_argument("--out_go_annotations", required=True)
     ap.add_argument("--out_species", required=True)
     ap.add_argument("--out_lengths", required=True)
+    ap.add_argument(
+        "--instances",
+        help="DDI mode: shared instances.tsv, whose family column resolves the "
+        "interaction CSV's family ids to the instance ids everything else is keyed by",
+    )
+    ap.add_argument("--out_instances", help="required with --instances")
     args = ap.parse_args()
 
-    proteins = get_protein_ids(args.ppis)
-    print(
-        f"Subsetting shared fetch batch to {len(proteins)} proteins for this dataset...",
-        file=sys.stderr,
-    )
+    if bool(args.instances) != bool(args.out_instances):
+        ap.error("--instances and --out_instances must be given together")
+
+    ids = get_protein_ids(args.ppis)
+
+    if args.instances:
+        rows = [row for row in read_instances(args.instances) if row["family"] in ids]
+        # sequences/go/lengths are instance-keyed; species.tsv carries a row per
+        # instance *and* a row per family (fetch_domains.py:build_species), and
+        # the family rows are what sample_negatives_ilp.py's taxon-pair term reads.
+        seq_ids = {row["instance_id"] for row in rows}
+        species_ids = seq_ids | ids
+        print(
+            f"Subsetting shared fetch batch to {len(seq_ids)} instances "
+            f"across {len(ids)} families for this dataset...",
+            file=sys.stderr,
+        )
+        write_instances(rows, args.out_instances)
+
+        no_instance = ids - {row["family"] for row in rows}
+        if no_instance:
+            print(
+                f"Warning: {len(no_instance)} families from this dataset have no sampled "
+                f"instance in the shared batch: {sorted(no_instance)}",
+                file=sys.stderr,
+            )
+    else:
+        seq_ids = species_ids = ids
+        print(
+            f"Subsetting shared fetch batch to {len(ids)} proteins for this dataset...",
+            file=sys.stderr,
+        )
 
     seqs = read_fasta(args.sequences)
-    write_fasta(seqs, proteins, args.out_sequences)
+    write_fasta(seqs, seq_ids, args.out_sequences)
 
-    filter_tsv(args.go_annotations, args.out_go_annotations, proteins)
-    filter_tsv(args.species, args.out_species, proteins)
-    filter_tsv(args.lengths, args.out_lengths, proteins)
+    filter_tsv(args.go_annotations, args.out_go_annotations, seq_ids)
+    filter_tsv(args.species, args.out_species, species_ids)
+    filter_tsv(args.lengths, args.out_lengths, seq_ids)
 
-    missing = proteins - set(seqs)
+    missing = seq_ids - set(seqs)
     if missing:
+        kind = "instances" if args.instances else "proteins"
         print(
-            f"Warning: {len(missing)} proteins from this dataset were not found in "
+            f"Warning: {len(missing)} {kind} from this dataset were not found in "
             f"the shared fetch batch: {sorted(missing)}",
             file=sys.stderr,
         )

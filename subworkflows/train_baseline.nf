@@ -8,10 +8,10 @@ workflow TRAIN_BASELINE {
     train_fasta        // tuple(meta, path)
     val_fasta            // tuple(meta, path)
     test_fasta            // tuple(meta, path)
-    train_csv              // tuple(meta, path)
-    val_csv                  // tuple(meta, path)
-    test_balanced_csv          // tuple(meta, path)
-    test_realistic_csv          // tuple(meta, path)
+    train_csv              // tuple(meta, negset, path)
+    val_csv                  // tuple(meta, negset, path)
+    test_balanced_csv          // tuple(meta, negset, path)
+    test_realistic_csv          // tuple(meta, negset, path)
 
     main:
     branched = train_fasta.join(val_fasta).join(test_fasta).branch { meta, train, val, test ->
@@ -38,7 +38,17 @@ workflow TRAIN_BASELINE {
     }
     embeddings = computed.mix(precomputed)
 
-    clf_inputs = train_csv.join(val_csv).join(test_balanced_csv).join(test_realistic_csv).join(embeddings)
+    // join(by: [0, 1]) on (meta, negset): a row asking for several negative sets
+    // has one item per set in each of the four channels, so a plain 1:1 join on
+    // meta alone would pair a negative set's train CSV with another's val CSV.
+    // The embeddings are one per dataset -- the sequence universe is a property of
+    // the positive split, which every negative set shares -- so they are broadcast
+    // with combine(by: 0) and no extra embedding work is done for the fan-out.
+    clf_inputs = train_csv.join(val_csv, by: [0, 1])
+        .join(test_balanced_csv, by: [0, 1])
+        .join(test_realistic_csv, by: [0, 1])
+        .combine(embeddings, by: 0)
+    // tuple(meta, negset, train, val, test_balanced, test_realistic, embeddings)
     clf = TRAIN_CLASSIFIER(clf_inputs)
 
     emit:

@@ -9,6 +9,7 @@ hierarchical clustering, and writes a MultiQC-compatible HTML file.
 
 import argparse
 import sys
+from collections import defaultdict
 
 import numpy as np
 from scipy.cluster.hierarchy import dendrogram, linkage
@@ -25,8 +26,13 @@ def read_fasta_ids(path):
 
 
 def build_bitscore_matrix(blast_path, protein_ids):
-    id_set = set(protein_ids)
-    id_idx = {pid: i for i, pid in enumerate(protein_ids)}
+    # An id maps to every row it occupies: under split_method=random a protein can
+    # sit in several splits, so it appears once per split. Keeping only its last
+    # row left the earlier copies blank and hid exactly the cross-split overlap
+    # that baseline exists to show.
+    id_idx = defaultdict(list)
+    for i, pid in enumerate(protein_ids):
+        id_idx[pid].append(i)
     n = len(protein_ids)
     mat = np.zeros((n, n), dtype=np.float32)
 
@@ -37,22 +43,28 @@ def build_bitscore_matrix(blast_path, protein_ids):
                 continue
             q = cols[0]
             s = cols[1]
-            if q == s or q not in id_set or s not in id_set:
+            if q not in id_idx or s not in id_idx:
                 continue
             try:
                 bitscore = float(cols[3])
             except ValueError:
                 continue
-            i, j = id_idx[q], id_idx[s]
-            if bitscore > mat[i, j]:
-                mat[i, j] = bitscore
-                mat[j, i] = bitscore
+            # A self-hit (q == s) fills only the cells between a protein's
+            # different copies; the diagonal stays empty, as it always has.
+            for i in id_idx[q]:
+                for j in id_idx[s]:
+                    if i != j and bitscore > mat[i, j]:
+                        mat[i, j] = bitscore
+                        mat[j, i] = bitscore
 
     return mat
 
 
 def cluster_order(mat):
     """Return leaf ordering from average-linkage clustering on bitscore profiles."""
+    if len(mat) < 2:
+        # linkage() needs at least two observations; a tiny split has nothing to order.
+        return list(range(len(mat)))
     Z = linkage(pdist(mat, metric="euclidean"), method="average", optimal_ordering=True)
     # scipy's dendrogram is recursive; with n leaves the stack can reach ~n frames.
     needed = max(sys.getrecursionlimit(), len(mat) * 10)
