@@ -82,7 +82,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--lambda-jaccard", type=float, default=0.0)
 
     # solver
-    ap.add_argument("--solver", choices=["auto", "gurobi", "scip", "highs"], default="auto")
+    ap.add_argument("--solver", type=str.lower, choices=["auto", "gurobi", "scip", "highs"], default="auto")
     ap.add_argument("--time-limit", type=float, default=200)
     ap.add_argument("--mip-gap", type=float, default=0.01)
     ap.add_argument("--threads", type=int, default=1)
@@ -439,7 +439,9 @@ def _fill_stratum(
             filler_keys = np.union1d(filler_keys, batch_keys[jac == 0])
         else:
             filler_keys = np.union1d(filler_keys, batch_keys)
-    else:
+    # Checked after the loop rather than as its for-else: the else also fired when
+    # the last allowed round was the one that filled the quota.
+    if len(priority_keys) + len(filler_keys) < quota:
         logging.warning(
             "Could not fill a candidate stratum (quota=%d) after %d sampling "
             "rounds; its true population is likely smaller than requested. "
@@ -501,6 +503,10 @@ def _subsample_candidate_pairs(
     if cfg.lambda_self_loop > 0:
         self_pairs = _missing_self_pairs(n_proteins, pos_pairs)
         self_keys = np.sort(self_pairs[:, 0] * n_proteins + self_pairs[:, 1])
+        if pool_keys is not None:
+            # ilp_candidates draws from the supplied network only: a self-pair the
+            # network does not contain is not a candidate either.
+            self_keys = np.intersect1d(self_keys, pool_keys)
     remaining = max(n_target - len(self_keys), 0)
 
     if taxon_codes is not None:
@@ -1297,7 +1303,15 @@ def sample_negatives_ilp(
     # empty labelled CSV keeps channel topology and the MultiQC series uniform.
     n_pos = int(len(pos_pairs))
     n_neg = int(round(neg_ratio * n_pos))
-    if n_pos == 0 or n_neg == 0 or len(candidates) == 0:
+    # Positives but no candidates at all is not an empty split: it is the same
+    # shortfall the check after build_context reports, just total. Writing a
+    # positives-only CSV here would hand single-class splits to training and bias.
+    if n_pos > 0 and n_neg > 0 and len(candidates) == 0:
+        raise RuntimeError(
+            f"{name}: need {n_neg} negatives but only 0 candidate pairs are available. "
+            f"Supply a larger --candidate-network or lower the negative ratio."
+        )
+    if n_pos == 0 or n_neg == 0:
         logging.warning(
             "%s: %d positives / %d negatives / %d candidates -- writing an empty split.",
             name,
@@ -1325,7 +1339,7 @@ def sample_negatives_ilp(
 
     print(f"Candidate pool size: {len(candidates)}", file=sys.stderr)
     print(
-        f"Number of unique proteins in the candidate set: {np.max(candidates)}",
+        f"Number of unique proteins in the candidate set: {len(np.unique(candidates))}",
         file=sys.stderr,
     )
     print(

@@ -121,22 +121,20 @@ class Renamer:
         return f"{idx:0{self.split_width}d}"
 
     # -- Sample column ----------------------------------------------------
-    def _split_label(self, sample):
-        """Return (label, rest) if `sample` starts with a known display label."""
+    def _split_labels(self, sample):
+        """Yield every (label, rest) split of `sample` on a known display label, longest
+        label first. More than one can match: with labels "ds" and "ds_2", the row
+        "ds_2_val" (dataset ds, split 2_val) also starts with "ds_2_", so the caller
+        tries each in turn rather than trusting the first."""
         for label in self.labels_longest_first:
             if sample == label:
-                return label, None
-            if sample.startswith(label + "_"):
-                return label, sample[len(label) + 1 :]
-        return None, None
+                yield label, None
+            elif sample.startswith(label + "_"):
+                yield label, sample[len(label) + 1 :]
 
-    def sample(self, value):
-        """Rewrite one Sample cell. Anything unrecognised is returned unchanged."""
-        label, rest = self._split_label(value)
-        if label is None:
-            if not _CATEGORY.match(value):
-                self.unmatched.add(value)
-            return value
+    def _rewrite(self, label, rest):
+        """The renumbered cell for one (label, rest) reading, or None if `rest` is not
+        a split suffix for it."""
         if rest is None:
             # Dataset-level: utils.mqc_dataset(), one row per dataset.
             return f"{self.dataset_index(label)}_{label}"
@@ -144,15 +142,25 @@ class Renamer:
         # with a further "_<tail>" (sample_negatives_ilp.py's per-protein rows).
         m = re.match(r"^(\d+)_(?P<tail>.+)$", rest)
         if not m:
-            self.unmatched.add(value)
-            return value
+            return None
         tail = m.group("tail")
         for split in _SPLITS_LONGEST_FIRST:
             if tail == split:
                 return f"{self.split_index(label, split)}_{label}_{split}"
             if tail.startswith(split + "_"):
                 return f"{self.split_index(label, split)}_{label}_{tail}"
-        self.unmatched.add(value)
+        return None
+
+    def sample(self, value):
+        """Rewrite one Sample cell. Anything unrecognised is returned unchanged."""
+        matched = False
+        for label, rest in self._split_labels(value):
+            matched = True
+            out = self._rewrite(label, rest)
+            if out is not None:
+                return out
+        if matched or not _CATEGORY.match(value):
+            self.unmatched.add(value)
         return value
 
     # -- section id -------------------------------------------------------

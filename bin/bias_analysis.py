@@ -231,10 +231,13 @@ MIN_PER_CLASS = 2
 
 
 def smallest_class(y):
-    """Size of the least-populated label in y; 0 for an empty split."""
-    if y.size == 0:
+    """Size of the least-populated label in y; 0 for an empty split, and 0 when only
+    one label is present at all -- an all-positive split would otherwise pass the
+    MIN_PER_CLASS guard with its own size and be reported as a measured NMI of 0."""
+    counts = np.unique(y, return_counts=True)[1]
+    if len(counts) < 2:
         return 0
-    return int(np.min(np.unique(y, return_counts=True)[1]))
+    return int(np.min(counts))
 
 
 def _prepare_split(pairs, y, embeddings):
