@@ -70,4 +70,3 @@ profiles {
 ### View the report
 
 The MultiQC report can be found at `results/multiqc/multiqc_report.html`, which you can view in a browser.
-```
