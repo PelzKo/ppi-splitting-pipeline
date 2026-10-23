@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Fetch protein sequences and GO annotations from UniProt for all proteins in a PPI CSV."""
+"""Fetch protein sequences and GO annotations from UniProt for all proteins in a PPI CSV.
 
+GO annotations inferred from interactions (evidence codes IPI, IGI) are dropped by default;
+pass --exclude-evidence '' to keep every annotation.
+"""
+
+import argparse
 import csv
+import json
 import ssl
 import sys
 import time
@@ -14,6 +20,9 @@ UNIPROT_FASTA_URL = "https://rest.uniprot.org/uniprotkb/{acc}.fasta"
 UNIPARC_URL = "https://rest.uniprot.org/uniparc/search"
 BATCH_SIZE = 100
 SEARCH_PAGE_SIZE = 500  # UniProt's documented max page size for /uniprotkb/search
+
+# Inferred from physical / genetic interaction: an interaction experiment, often one of the pairs being predicted.
+DEFAULT_EXCLUDED_EVIDENCE = ("IPI", "IGI")
 
 
 class InvalidAccessionBatch(Exception):
@@ -85,7 +94,7 @@ def _is_stream_error(text: str) -> bool:
     """True if `text` is UniProt's own error page for a request that failed
     server-side after the response had already started (HTTP 200), so it
     never raises HTTPError/URLError and would otherwise look like a
-    successful-but-unparseable TSV response."""
+    successful-but-unparseable response."""
     return _STREAM_ERROR_MARKER in text.lower()
 
 
@@ -136,7 +145,8 @@ def _fetch_page(url, retries=3):
 
 
 def fetch_batch(accessions, retries=3, include_sequence=True):
-    """Batch request returning accession, [sequence], GO IDs, and taxon ID as TSV.
+    """Batch request returning the UniProt JSON entries (accession, [sequence], GO
+    cross-references with evidence codes, and taxon ID) for `accessions`.
 
     accessions should be canonical (no isoform suffix) to ensure UniProt matches them.
     Uses UniProt's paginated /uniprotkb/search endpoint (per their guidance for
@@ -146,9 +156,11 @@ def fetch_batch(accessions, retries=3, include_sequence=True):
     Follows the `Link: rel="next"` cursor until UniProt reports no more pages
     (in practice always one page here, since BATCH_SIZE <= SEARCH_PAGE_SIZE).
 
+    JSON rather than TSV because only the JSON entries carry each GO term's evidence code.
+
     Pass include_sequence=False to skip the "sequence" field for callers that
     already have sequences from elsewhere and only want taxonomy/GO -- pair
-    with parse_batch(text, include_sequence=False).
+    with parse_batch(entries, include_sequence=False).
     """
     fields = "accession,go_p,go_f,go_c,organism_id"
     if include_sequence:
@@ -157,25 +169,21 @@ def fetch_batch(accessions, retries=3, include_sequence=True):
     params = urllib.parse.urlencode(
         {
             "query": query,
-            "format": "tsv",
+            "format": "json",
             "fields": fields,
             "size": SEARCH_PAGE_SIZE,
         }
     )
     url = f"{UNIPROT_URL}?{params}"
 
-    header = None
-    rows = []
+    entries = []
     while url:
         text, url = _fetch_page(url, retries)
-        lines = text.splitlines()
-        if not lines:
+        if not text.strip():
             break
-        if header is None:
-            header = lines[0]
-        rows.extend(lines[1:])
+        entries.extend(json.loads(text).get("results", []))
 
-    return "\n".join([header or "", *rows])
+    return entries
 
 
 def fetch_uniparc_entry(acc, retries=3):
@@ -213,35 +221,54 @@ def fetch_uniparc_entry(acc, retries=3):
     return None
 
 
-def _parse_go(raw):
-    return {t.strip() for t in raw.split(";") if t.strip()}
+_ASPECT_CATEGORY = {"P": "BP", "F": "MF", "C": "CC"}
 
 
-def parse_batch(text, include_sequence=True):
-    """Return ({accession: sequence}, {accession: {BP/MF/CC: set}}, {accession: taxon_id}).
+def _parse_go(entry, excluded_evidence):
+    """Return ({BP/MF/CC: set of 'name [GO:id]' terms}, dropped_count) from one JSON entry.
 
-    The sequence dict is empty when include_sequence=False, matching the
-    columns fetch_batch(..., include_sequence=False) actually requested.
+    Terms are rendered exactly as the TSV go_p/go_f/go_c columns render them
+    ("autophagy [GO:0006914]"), so go_annotations.tsv keeps its format. A term is
+    dropped when its evidence code is in `excluded_evidence`; UniProt lists one
+    evidence type per GO cross-reference.
     """
-    go_col = 2 if include_sequence else 1
-    seqs, go, species = {}, {}, {}
-    lines = text.splitlines()
-    for line in lines[1:]:  # skip header row
-        parts = line.split("\t")
-        if len(parts) < go_col + 3:
+    go = {"BP": set(), "MF": set(), "CC": set()}
+    dropped = 0
+    for ref in entry.get("uniProtKBCrossReferences", []):
+        if ref.get("database") != "GO":
             continue
-        acc = parts[0].strip()
-        if acc:
-            if include_sequence:
-                seqs[acc] = parts[1].strip()
-            go[acc] = {
-                "BP": _parse_go(parts[go_col]),
-                "MF": _parse_go(parts[go_col + 1]),
-                "CC": _parse_go(parts[go_col + 2]),
-            }
-            species_col = go_col + 3
-            species[acc] = parts[species_col].strip() if len(parts) > species_col else ""
-    return seqs, go, species
+        props = {p["key"]: p["value"] for p in ref.get("properties", [])}
+        term = props.get("GoTerm", "")
+        evidence = props.get("GoEvidenceType", "").split(":", 1)[0]
+        if len(term) < 3 or term[1] != ":" or term[0] not in _ASPECT_CATEGORY:
+            continue
+        if evidence in excluded_evidence:
+            dropped += 1
+            continue
+        go[_ASPECT_CATEGORY[term[0]]].add(f"{term[2:]} [{ref['id']}]")
+    return go, dropped
+
+
+def parse_batch(entries, include_sequence=True, excluded_evidence=DEFAULT_EXCLUDED_EVIDENCE):
+    """Return ({accession: sequence}, {accession: {BP/MF/CC: set}}, {accession: taxon_id}, dropped).
+
+    `dropped` counts the GO annotations left out for their evidence code. The
+    sequence dict is empty when include_sequence=False, matching the fields
+    fetch_batch(..., include_sequence=False) actually requested.
+    """
+    seqs, go, species = {}, {}, {}
+    dropped = 0
+    for entry in entries:
+        acc = str(entry.get("primaryAccession", "")).strip()
+        if not acc:
+            continue
+        if include_sequence:
+            seqs[acc] = str(entry.get("sequence", {}).get("value", "")).strip()
+        go[acc], n = _parse_go(entry, excluded_evidence)
+        dropped += n
+        taxon = entry.get("organism", {}).get("taxonId", "")
+        species[acc] = str(taxon).strip() if taxon != "" else ""
+    return seqs, go, species, dropped
 
 
 def write_species_tsv(path, protein_ids, species):
@@ -271,10 +298,19 @@ def write_go_tsv(path, protein_ids, go):
 
 
 def main():
-    if len(sys.argv) != 5:
-        sys.exit(f"Usage: {sys.argv[0]} proteins.txt sequences.fasta go_annotations.tsv species.tsv")
-
-    proteins_path, fasta_out, go_out, species_out = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("proteins", help="plain text file, one protein ID per line")
+    parser.add_argument("fasta_out")
+    parser.add_argument("go_out")
+    parser.add_argument("species_out")
+    parser.add_argument(
+        "--exclude-evidence",
+        default=",".join(DEFAULT_EXCLUDED_EVIDENCE),
+        help="comma-separated GO evidence codes to drop (default: %(default)s); '' keeps every annotation",
+    )
+    args = parser.parse_args()
+    excluded_evidence = frozenset(code.strip().upper() for code in args.exclude_evidence.split(",") if code.strip())
+    proteins_path, fasta_out, go_out, species_out = args.proteins, args.fasta_out, args.go_out, args.species_out
     proteins = read_protein_list(proteins_path)
     canonical_map = build_canonical_map(proteins)
     canonicals = sorted(canonical_map.keys())
@@ -282,27 +318,31 @@ def main():
         f"Fetching data for {len(proteins)} proteins " f"({len(canonicals)} canonical accessions) from UniProt...",
         file=sys.stderr,
     )
+    if excluded_evidence:
+        print(f"Dropping GO annotations with evidence {sorted(excluded_evidence)}", file=sys.stderr)
 
     # Fetch by canonical accession; UniProt ignores isoform suffixes in queries.
     canon_seqs, canon_go, canon_species = {}, {}, {}
+    dropped_total = 0
     uniparc_only = []  # accessions UniProtKB rejects outright; resolved via UniParc below
     for i in range(0, len(canonicals), BATCH_SIZE):
         batch = canonicals[i : i + BATCH_SIZE]
         try:
-            seqs, go, species = parse_batch(fetch_batch(batch))
+            seqs, go, species, dropped = parse_batch(fetch_batch(batch), excluded_evidence=excluded_evidence)
         except InvalidAccessionBatch:
             print(
                 f"  Batch rejected (contains an accession UniProt doesn't recognize); "
                 f"retrying the {len(batch)} accessions individually to isolate it...",
                 file=sys.stderr,
             )
-            seqs, go, species = {}, {}, {}
+            seqs, go, species, dropped = {}, {}, {}, 0
             for acc in batch:
                 try:
-                    s, g, sp = parse_batch(fetch_batch([acc]))
+                    s, g, sp, d = parse_batch(fetch_batch([acc]), excluded_evidence=excluded_evidence)
                     seqs.update(s)
                     go.update(g)
                     species.update(sp)
+                    dropped += d
                 except InvalidAccessionBatch:
                     print(f"Failed to fetch {acc}; falling back to UniParc...", file=sys.stderr)
                     uniparc_only.append(acc)
@@ -310,6 +350,7 @@ def main():
         canon_seqs.update(seqs)
         canon_go.update(go)
         canon_species.update(species)
+        dropped_total += dropped
         print(
             f"  {min(i + BATCH_SIZE, len(canonicals))}/{len(canonicals)} canonical accessions fetched",
             file=sys.stderr,
@@ -365,7 +406,11 @@ def main():
     write_species_tsv(species_out, proteins, all_species)
 
     print(f"Written {len(all_seqs)} sequences to {fasta_out}", file=sys.stderr)
-    print(f"Written GO annotations for {len(proteins)} proteins to {go_out}", file=sys.stderr)
+    print(
+        f"Written GO annotations for {len(proteins)} proteins to {go_out} "
+        f"({dropped_total} annotations dropped for evidence {sorted(excluded_evidence)})",
+        file=sys.stderr,
+    )
     print(f"Written species (taxon IDs) for {len(proteins)} proteins to {species_out}", file=sys.stderr)
 
 

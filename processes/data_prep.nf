@@ -12,7 +12,8 @@ process FETCH_DATA {
 
     script:
     """
-    fetch_data.py ${proteins} sequences.fasta go_annotations.tsv species.tsv
+    fetch_data.py ${proteins} sequences.fasta go_annotations.tsv species.tsv \\
+        --exclude-evidence "${params.go_exclude_evidence}"
     """
 }
 
