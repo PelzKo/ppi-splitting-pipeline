@@ -68,6 +68,32 @@ def write_ppi_csv(rows, path):
 
 
 # ---------------------------------------------------------------------------
+# Domain instance table I/O (DDI mode)
+# ---------------------------------------------------------------------------
+
+INSTANCE_COLUMNS = ["instance_id", "family", "clan", "protein_id", "start", "end", "taxon_id", "source_db"]
+
+
+def read_instances(path):
+    """Return list of row dicts from an instances.tsv."""
+    with open(path) as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
+
+
+def instances_by_family(rows):
+    """Invert read_instances() output to {family: {instance_id}}."""
+    members = {}
+    for row in rows:
+        members.setdefault(row["family"], set()).add(row["instance_id"])
+    return members
+
+
+def instance_parent(instance_id):
+    """Return the parent protein of an instance id ({family}_{protein}_{start}_{end})."""
+    return instance_id.rsplit("_", 3)[1]
+
+
+# ---------------------------------------------------------------------------
 # KaHIP partition I/O
 # ---------------------------------------------------------------------------
 

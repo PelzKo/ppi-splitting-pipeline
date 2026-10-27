@@ -50,9 +50,16 @@ workflow DATA_PREP {
     species_ch        = precomputed_species.mix(subset_out.species)
     lengths_ch        = precomputed_lengths.mix(subset_out.lengths)
 
+    // Placeholder for DATA_PREP_DDI's instances.tsv: a missing item would make
+    // downstream joins drop the dataset silently.
+    instances_ch = datasets_ch.map { meta, f -> tuple(meta, []) }
+
     emit:
     sequences      = sequences_ch
     go_annotations = go_annotations_ch
     species        = species_ch
     lengths        = lengths_ch
+    instances      = instances_ch
+    // DDI mode only; empty here so both DATA_PREP* emit the same channels.
+    dropped_families = channel.empty()
 }

@@ -30,11 +30,17 @@ params {
     neg_ilp_lambda_jaccard: Float
     neg_ilp_time_limit: Integer
     neg_ilp_mip_gap: Float
+
+    // DDI mode
+    ddi_mode: Boolean
+    ddi_examples_target: Integer
+    ddi_examples_pool_factor: Integer
 }
 
 include { samplesheetToList } from 'plugin/nf-schema'
 
 include { DATA_PREP }        from './subworkflows/data_prep'
+include { DATA_PREP_DDI }    from './subworkflows/data_prep_ddi'
 include { CLUSTERING }       from './subworkflows/clustering'
 include { SPLIT_POSITIVES }  from './subworkflows/split_positives'
 include { SAMPLE_NEGATIVES } from './subworkflows/sample_negatives'
@@ -123,7 +129,7 @@ def buildDatasetsChannel() {
     // samplesheetToList() returns each row as a positional list, not a map.
     // Order here must match assets/schema_input.json's `properties`.
     def fields = [
-        "id", "ppis", "sequences", "go_annotations", "species", "blast_results", "candidate_network",
+        "id", "ppis", "sequences", "go_annotations", "species", "domain_instances", "blast_results", "candidate_network",
         "partition", "node_mapping",
         "train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis",
         "embedding_model", "cdhit_identity", "cdhit_wordsize", "split_method", "edge_weight",
@@ -160,9 +166,11 @@ def buildDatasetsChannel() {
 
         // split_only skips FETCH_DATA/CLUSTERING/TRAIN_BASELINE/QC entirely,
         // split/negative-sampling method choice is no longer per-dataset; it's always the ILP path.
-        // Mirrored in PPI_SPLITTING.
+        // Mirrored in PPI_SPLITTING; DDI mode needs domain_instances instead of GO annotations.
         if (params.split_only) {
-            def required = ["sequences", "go_annotations", "species", "partition", "node_mapping"]
+            def required = params.ddi_mode
+                ? ["sequences", "species", "domain_instances", "partition", "node_mapping"]
+                : ["sequences", "go_annotations", "species", "partition", "node_mapping"]
             def missing = required.findAll { !row[it] }
             if (missing) {
                 error("--split_only requires every samplesheet row to supply ${required.join(', ')} (row '${row.id}' is missing ${missing.join(', ')}).")
@@ -199,6 +207,7 @@ def buildDatasetsChannel() {
             sequences        : row.sequences         ? file(row.sequences,         checkIfExists: true) : [],
             go_annotations   : row.go_annotations    ? file(row.go_annotations,    checkIfExists: true) : [],
             species          : row.species           ? file(row.species,           checkIfExists: true) : [],
+            domain_instances : row.domain_instances  ? file(row.domain_instances,  checkIfExists: true) : [],
             blast_results    : row.blast_results     ? file(row.blast_results,     checkIfExists: true) : [],
             candidate_network: row.candidate_network ? file(row.candidate_network, checkIfExists: true) : [],
             partition        : row.partition         ? file(row.partition,         checkIfExists: true) : [],
@@ -241,7 +250,9 @@ workflow PPI_SPLITTING {
             }
         }
         if (params.split_only) {
-            def required = ["sequences", "go_annotations", "species", "partition", "node_mapping"]
+            def required = params.ddi_mode
+                ? ["sequences", "species", "domain_instances", "partition", "node_mapping"]
+                : ["sequences", "go_annotations", "species", "partition", "node_mapping"]
             def missing = required.findAll { k -> !f[k] }
             if (missing) {
                 error("--split_only requires every dataset to supply ${required.join(', ')} (dataset '${meta.id}' is missing ${missing.join(', ')}).")
@@ -294,11 +305,18 @@ workflow PPI_SPLITTING {
         )
 
         // Every emit is defined in both branches so its shape does not depend on the mode.
+        instances_ch        = channel.empty()
         sequences_ch        = channel.empty()
         labelled_ch         = channel.empty()
         multiqc_report_ch   = channel.empty()
+        dropped_families_ch = channel.empty()
     } else {
-        data = DATA_PREP(checked_ch)
+        // Both emit the same channel names, so nothing downstream branches on DDI mode.
+        if (params.ddi_mode) {
+            data = DATA_PREP_DDI(checked_ch)
+        } else {
+            data = DATA_PREP(checked_ch)
+        }
 
         if (params.split_only) {
             // --split_only: partition/node_mapping are precomputed and required
@@ -348,16 +366,20 @@ workflow PPI_SPLITTING {
             )
             multiqc_report_ch = qc.multiqc_report
         }
+        instances_ch        = data.instances
         sequences_ch        = data.sequences
         labelled_ch         = neg.labelled
+        dropped_families_ch = data.dropped_families
     }
 
     emit:
     // negset is a tuple field, not a meta key: join these on `by: [0, 1]`.
     // Under --bias_only every channel is empty.
+    instances        = instances_ch       // tuple(meta, instances.tsv); (meta, []) in PPI mode
     sequences        = sequences_ch       // tuple(meta, sequences.fasta)
-    labelled         = labelled_ch        // tuple(meta, negset, label, csv)
+    labelled         = labelled_ch        // tuple(meta, negset, label, csv) at family level
     multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only and --bias_only
+    dropped_families = dropped_families_ch  // tuple([id: "_shared"], tsv); at most one item, never join() it
 }
 
 workflow {
