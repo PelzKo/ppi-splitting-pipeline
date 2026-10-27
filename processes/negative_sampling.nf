@@ -79,3 +79,40 @@ process SAMPLE_NEGATIVES_ILP {
         --id                 ${mqcLabel(meta, negset)}
     """
 }
+
+// DDI mode only: turns the labelled family pairs into domain-instance pairs --
+// positives from SELECT_EXAMPLES' examples, negatives drawn from the split's universe.
+process EXPAND_NEGATIVES {
+    publishDir(path: { "${params.outdir}/${meta.id}" }, mode: 'copy', saveAs: { f -> f.endsWith('_mqc.tsv') ? null : f })
+    tag "${meta.id}${nsuffix}_${label}"
+    label 'error_retry'
+
+    input:
+    // split is the SELECT_EXAMPLES split ("test" for both test labels). labelled
+    // is staged under a fixed name -- see SAMPLE_NEGATIVES_DEGREE.
+    tuple val(meta), val(split), val(negset), val(label), val(nsuffix),
+          path(labelled, stageAs: 'labelled_in.csv'),
+          path(examples), path(candidate_examples), path(universe), path(reserve), path(fasta),
+          path(instances)
+
+    output:
+    tuple val(meta), val(negset), val(label), val(nsuffix), path("${label}${nsuffix}_instances.csv"), emit: labelled
+    tuple val(meta), path("${label}*_mqc.tsv"),                                                       emit: mqc
+
+    script:
+    """
+    expand_negatives.py \\
+        --labelled           ${labelled} \\
+        --examples           ${examples} \\
+        --candidate-examples ${candidate_examples} \\
+        --universe           ${universe} \\
+        --reserve            ${reserve} \\
+        --instances          ${instances} \\
+        --fasta              ${fasta} \\
+        --output             ${label}${nsuffix}_instances.csv \\
+        --split-name         ${label} \\
+        --examples-target    ${params.ddi_examples_target} \\
+        --seed               ${params.seed} \\
+        --id                 ${mqcLabel(meta, negset)}
+    """
+}

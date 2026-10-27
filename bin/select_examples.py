@@ -5,8 +5,8 @@ DDI mode: turn family-pair DDIs into domain-instance-pair examples.
 Reads the three split CSVs (Pfam family pairs), the split FASTAs (domain instances),
 instances.tsv and optionally a candidate_network of negative family pairs. Picks up to
 N instance pairs per DDI and writes {split}_sel.csv, {split}_examples.csv,
-{split}_candidate_examples.csv, {split}_universe.txt and unclaimed.txt, plus
-MultiQC tables.
+{split}_candidate_examples.csv, {split}_universe.txt, {split}_reserve.txt and
+unclaimed.txt, plus MultiQC tables.
 
 Key constraint: a parent protein is used by at most one split. Selection is solved as a
 lexicographic ILP per connected component of contested parents (keep every DDI, fill
@@ -489,6 +489,30 @@ def write_ids(ids, path):
             fh.write(f"{i}\n")
 
 
+def partition_reserve(unclaimed, weights, seed, allow_shared):
+    """Hand each never-in-play parent protein to one split, weighted by the DDIs each split kept.
+
+    Under --allow-shared-parents every split gets the whole pool.
+    """
+    if allow_shared:
+        return {s: set(unclaimed) for s in SPLITS}
+    out = {s: set() for s in SPLITS}
+    active = [s for s in SPLITS if weights.get(s, 0) > 0]
+    if not active:
+        return out
+    total = float(sum(weights[s] for s in active))
+    rng = random.Random(f"{seed}:reserve")
+    for p in sorted(unclaimed):
+        x = rng.random() * total
+        acc = 0.0
+        for s in active:
+            acc += weights[s]
+            if x < acc:
+                out[s].add(p)
+                break
+    return out
+
+
 def write_mqc(stats, ilp, id_):
     """Write the per-split outcome bar, per-split stats table and per-dataset ILP table.
 
@@ -776,7 +800,15 @@ def main():
     # since handing it to a split now would reintroduce the leak.
     unclaimed = all_parents - set(splits_of)
     write_ids(unclaimed, "unclaimed.txt")
-    print(f"{len(unclaimed):,} parent proteins never in play", file=sys.stderr)
+    reserve = partition_reserve(unclaimed, {s: stats[s]["kept"] for s in SPLITS}, args.seed, args.allow_shared_parents)
+    for split in SPLITS:
+        write_ids(reserve[split], f"{split}_reserve.txt")
+    print(
+        f"{len(unclaimed):,} parent proteins never in play, split "
+        + ", ".join(f"{len(reserve[s]):,} {s}" for s in SPLITS)
+        + " (free for the negative sampler to extend a split's universe with)",
+        file=sys.stderr,
+    )
 
     write_mqc(stats, ilp, args.id)
 

@@ -160,7 +160,11 @@ process SELECT_EXAMPLES {
     tuple val(meta), path("train_candidate_examples.csv"), emit: train_candidates
     tuple val(meta), path("val_candidate_examples.csv"),   emit: val_candidates
     tuple val(meta), path("test_candidate_examples.csv"),  emit: test_candidates
-    // Parents no candidate reached.
+    // Parents no candidate reached, partitioned by realised split size.
+    tuple val(meta), path("train_reserve.txt"), emit: train_reserve
+    tuple val(meta), path("val_reserve.txt"),   emit: val_reserve
+    tuple val(meta), path("test_reserve.txt"),  emit: test_reserve
+    // Their union, read by tools/check_ddi_invariants.py.
     tuple val(meta), path("unclaimed.txt"), emit: unclaimed
     tuple val(meta), path("*_mqc.tsv"),     emit: mqc
 

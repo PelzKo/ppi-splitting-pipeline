@@ -1,4 +1,4 @@
-include { SAMPLE_NEGATIVES_DEGREE; SAMPLE_NEGATIVES_ILP } from '../processes/negative_sampling'
+include { SAMPLE_NEGATIVES_DEGREE; SAMPLE_NEGATIVES_ILP; EXPAND_NEGATIVES } from '../processes/negative_sampling'
 
 // Output filename suffix: "" for a single negative set, "_<negset>" for several.
 def negsuffix(negsets, negset) {
@@ -20,7 +20,9 @@ def broadcastRealistic(ch, negsets_ch) {
 
 // Samples negative PPIs for each split, using the degree-preserving
 // sampler, a fully-uniform variant, or the bias-aware ILP sampler --
-// selected per entry of meta.negative_sampling_method.
+// selected per entry of meta.negative_sampling_method. In DDI mode the
+// samplers run on Pfam families and EXPAND_NEGATIVES turns each labelled pair
+// into domain-instance pairs.
 workflow SAMPLE_NEGATIVES {
     take:
     train_ppis            // tuple(meta, path)
@@ -29,6 +31,8 @@ workflow SAMPLE_NEGATIVES {
     species_ch              // tuple(meta, path)
     go_annotations_ch        // tuple(meta, path)
     candidate_network_ch      // tuple(meta, candidate_network_or_[])
+    ddi_files_ch               // tuple(meta, split, examples, cand_examples, universe, reserve, fasta)
+    instances_ch                // tuple(meta, instances_or_[])
     negsets_ch                   // tuple(meta, [negset, ...])
 
     main:
@@ -96,8 +100,30 @@ workflow SAMPLE_NEGATIVES {
     degree_out = SAMPLE_NEGATIVES_DEGREE(uniform_inputs.mix(default_inputs))
 
     fam_labelled = ilp_out.labelled.mix(degree_out.labelled)  // tuple(meta, negset, label, suffix, csv)
-    neg_mqc      = ilp_out.mqc.mix(degree_out.mqc)
-    neg_labelled = broadcastRealistic(fam_labelled, negsets_ch)
+    fam_mqc      = ilp_out.mqc.mix(degree_out.mqc)
+
+    if (params.ddi_mode) {
+        // combine(by: [0, 1]), not join: several items (test_balanced/test_realistic,
+        // several negative sets) key onto one split's bundle, and join is 1:1.
+        exp_inputs = fam_labelled
+            .map { meta, negset, label, suffix, f ->
+                tuple(meta, label.startsWith("test") ? "test" : label, negset, label, suffix, f)
+            }
+            .combine(ddi_files_ch, by: [0, 1])
+            .combine(instances_ch, by: 0)
+        // tuple(meta, split, negset, label, suffix, labelled, examples, cand_examples, universe, reserve, fasta, instances)
+
+        exp_out       = EXPAND_NEGATIVES(exp_inputs)
+        neg_labelled  = broadcastRealistic(exp_out.labelled, negsets_ch)
+        neg_mqc       = fam_mqc.mix(exp_out.mqc)
+        inst_labelled = neg_labelled
+        out_fam       = broadcastRealistic(fam_labelled, negsets_ch)
+    } else {
+        neg_labelled  = broadcastRealistic(fam_labelled, negsets_ch)
+        neg_mqc       = fam_mqc
+        inst_labelled = channel.empty()
+        out_fam       = neg_labelled
+    }
 
     neg_branched = neg_labelled.branch {
         meta, negset, label, f ->
@@ -113,5 +139,6 @@ workflow SAMPLE_NEGATIVES {
     test_balanced  = neg_branched.test_balanced.map  { meta, negset, label, f -> tuple(meta, negset, f) }
     test_realistic = neg_branched.test_realistic.map { meta, negset, label, f -> tuple(meta, negset, f) }
     mqc            = neg_mqc
-    labelled       = neg_labelled  // tuple(meta, negset, label, csv)
+    labelled       = out_fam        // tuple(meta, negset, label, csv) at family level
+    labelled_inst  = inst_labelled  // same, at domain-instance level; empty in PPI mode
 }

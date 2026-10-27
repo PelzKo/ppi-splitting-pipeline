@@ -37,6 +37,8 @@ KIND_ORDER = [
     "ddi_examples_bar",
     "ddi_examples_stats",
     "ddi_examples_ilp",
+    "ddi_expand_bar",
+    "ddi_expand_stats",
     "neg_ilp_diagnostics",
     "neg_ilp_residuals",
     # per-dataset, one section each

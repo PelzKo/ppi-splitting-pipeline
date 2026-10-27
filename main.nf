@@ -318,6 +318,7 @@ workflow PPI_SPLITTING {
         sequences_ch        = channel.empty()
         labelled_ch         = channel.empty()
         multiqc_report_ch   = channel.empty()
+        labelled_inst_ch    = channel.empty()
         dropped_families_ch = channel.empty()
     } else {
         // Both emit the same channel names, so nothing downstream branches on DDI mode.
@@ -349,6 +350,8 @@ workflow PPI_SPLITTING {
             split.train_ppis, split.val_ppis, split.test_ppis,
             data.species, data.go_annotations,
             candidate_network_ch,
+            // DDI mode only (empty in PPI mode)
+            split.ddi_files, data.instances,
             negsets_ch
         )
 
@@ -379,6 +382,7 @@ workflow PPI_SPLITTING {
         instances_ch        = data.instances
         sequences_ch        = data.sequences
         labelled_ch         = neg.labelled
+        labelled_inst_ch    = neg.labelled_inst
         dropped_families_ch = data.dropped_families
     }
 
@@ -388,6 +392,7 @@ workflow PPI_SPLITTING {
     instances        = instances_ch       // tuple(meta, instances.tsv); (meta, []) in PPI mode
     sequences        = sequences_ch       // tuple(meta, sequences.fasta)
     labelled         = labelled_ch        // tuple(meta, negset, label, csv) at family level
+    labelled_inst    = labelled_inst_ch   // same, at domain-instance level; empty in PPI mode
     multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only and --bias_only
     dropped_families = dropped_families_ch  // tuple([id: "_shared"], tsv); at most one item, never join() it
 }

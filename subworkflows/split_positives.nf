@@ -87,12 +87,12 @@ workflow SPLIT_POSITIVES {
         out_test_ppis  = sel.test_ppis
         // Keyed (meta, split) for SAMPLE_NEGATIVES' combine(by: [0, 1]), which
         // broadcasts the test entry to both test_balanced and test_realistic.
-        ddi_files = sel.train_examples.join(sel.train_candidates).join(sel.train_universe).join(fasta_train)
-                .map { meta, ex, cand, uni, fa -> tuple(meta, "train", ex, cand, uni, fa) }
-            .mix(sel.val_examples.join(sel.val_candidates).join(sel.val_universe).join(fasta_val)
-                .map { meta, ex, cand, uni, fa -> tuple(meta, "val", ex, cand, uni, fa) })
-            .mix(sel.test_examples.join(sel.test_candidates).join(sel.test_universe).join(fasta_test)
-                .map { meta, ex, cand, uni, fa -> tuple(meta, "test", ex, cand, uni, fa) })
+        ddi_files = sel.train_examples.join(sel.train_candidates).join(sel.train_universe).join(sel.train_reserve).join(fasta_train)
+                .map { meta, ex, cand, uni, res, fa -> tuple(meta, "train", ex, cand, uni, res, fa) }
+            .mix(sel.val_examples.join(sel.val_candidates).join(sel.val_universe).join(sel.val_reserve).join(fasta_val)
+                .map { meta, ex, cand, uni, res, fa -> tuple(meta, "val", ex, cand, uni, res, fa) })
+            .mix(sel.test_examples.join(sel.test_candidates).join(sel.test_universe).join(sel.test_reserve).join(fasta_test)
+                .map { meta, ex, cand, uni, res, fa -> tuple(meta, "test", ex, cand, uni, res, fa) })
         sorted_mqc     = splitter_mqc.mix(sel.mqc)
     } else {
         out_train_ppis = fam_train
@@ -109,7 +109,7 @@ workflow SPLIT_POSITIVES {
     train_fasta = fasta_train
     val_fasta   = fasta_val
     test_fasta  = fasta_test
-    ddi_files   = ddi_files  // tuple(meta, split, examples, candidate_examples, universe, fasta); DDI mode only
+    ddi_files   = ddi_files  // tuple(meta, split, examples, candidate_examples, universe, reserve, fasta); DDI mode only
     sorted_mqc  = sorted_mqc
     nr_mqc      = nr.mqc
 }
