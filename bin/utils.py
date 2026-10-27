@@ -199,6 +199,23 @@ def read_labelled_csv(path):
     return pairs, np.array(labels)
 
 
+def read_family_pairs(path):
+    """Return the sorted (family1, family2) pair per row, or None if the CSV has no family columns.
+
+    Rows are in file order, so they line up with read_labelled_csv().
+    """
+    with open(path) as fh:
+        reader = csv.DictReader(fh)
+        cols = reader.fieldnames or []
+        if "family1" not in cols or "family2" not in cols:
+            return None
+        pairs = []
+        for row in reader:
+            f1, f2 = row["family1"].strip(), row["family2"].strip()
+            pairs.append((min(f1, f2), max(f1, f2)))
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # Embeddings
 # ---------------------------------------------------------------------------

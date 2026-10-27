@@ -13,19 +13,24 @@ workflow BIAS_DIAGNOSTICS {
     test_realistic_ppis
     blast_out             // tuple(meta, path)
     embeddings
-    go_annotations_ch
+    go_annotations_ch     // tuple(meta, path_or_[])
     species_ch
 
     main:
     // Whether to include "same_species" depends on each dataset's own
     // species.tsv, so it's computed per-dataset here rather than with a
     // single run-wide collect().
+    // DDI mode has no GO annotations, so it drops the GO attributes and adds parent_degree.
+    // Names must match bias_analysis.py's ATTRIBUTES (its argparse choices).
     attrs_ch = species_ch.map { meta, sp ->
         def taxa = sp.splitCsv(header: true, sep: '\t').collect { it.taxon_id }.unique()
-        def attrs = ["sequence_similarity", "embedding_similarity",
-                     "functional_relatedness_BP", "functional_relatedness_MF",
-                     "functional_relatedness_CC", "self_interactions",
-                     "topology_shortcut"]
+        def attrs = params.ddi_mode
+            ? ["sequence_similarity", "embedding_similarity", "self_interactions",
+               "topology_shortcut", "parent_degree"]
+            : ["sequence_similarity", "embedding_similarity",
+               "functional_relatedness_BP", "functional_relatedness_MF",
+               "functional_relatedness_CC", "self_interactions",
+               "topology_shortcut"]
         if (taxa.size() > 1) attrs << "same_species"
         tuple(meta, attrs)
     }.flatMap { meta, attrs -> attrs.collect { a -> tuple(meta, a) } }

@@ -160,7 +160,10 @@ def buildDatasetsChannel() {
         // bias_only skips everything upstream of the bias diagnostics, so the splits, BLAST hits,
         // GO/species tables, and embeddings must all be supplied precomputed. Mirrored in PPI_SPLITTING.
         if (params.bias_only) {
-            def required = ["train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis", "go_annotations", "species", "blast_results"]
+            def required = ["train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis", "species", "blast_results"]
+            if (!params.ddi_mode) {
+                required << "go_annotations"
+            }
             def missing = required.findAll { !row[it] }
             if (missing) {
                 error("--bias_only requires every samplesheet row to supply ${required.join(', ')} (row '${row.id}' is missing ${missing.join(', ')}).")
@@ -220,7 +223,7 @@ def buildDatasetsChannel() {
             candidate_network: row.candidate_network ? file(row.candidate_network, checkIfExists: true) : [],
             partition        : row.partition         ? file(row.partition,         checkIfExists: true) : [],
             node_mapping     : row.node_mapping      ? file(row.node_mapping,      checkIfExists: true) : [],
-            // --bias_only's four precomputed splits
+            // --bias_only's four precomputed splits (*_instances.csv in DDI mode)
             train_ppis         : row.train_ppis         ? file(row.train_ppis,         checkIfExists: true) : [],
             val_ppis           : row.val_ppis           ? file(row.val_ppis,           checkIfExists: true) : [],
             test_balanced_ppis : row.test_balanced_ppis ? file(row.test_balanced_ppis, checkIfExists: true) : [],
@@ -248,7 +251,10 @@ workflow PPI_SPLITTING {
         }
         // Same checks as buildDatasetsChannel(); change the two together.
         if (params.bias_only) {
-            def required = ["train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis", "go_annotations", "species", "blast_results"]
+            def required = ["train_ppis", "val_ppis", "test_balanced_ppis", "test_realistic_ppis", "species", "blast_results"]
+            if (!params.ddi_mode) {
+                required << "go_annotations"
+            }
             def missing = required.findAll { k -> !f[k] }
             if (missing) {
                 error("--bias_only requires every dataset to supply ${required.join(', ')} (dataset '${meta.id}' is missing ${missing.join(', ')}).")
@@ -309,6 +315,7 @@ workflow PPI_SPLITTING {
             bias_in.map { meta, ns, f -> tuple(meta, ns, f.test_realistic_ppis) },
             checked_ch.map { meta, f -> tuple(meta, f.blast_results) },
             checked_ch.map { meta, f -> tuple(meta, file(meta.embedding_model, checkIfExists: true)) },
+            // [] under --ddi_mode, which has no GO table; BIAS_ANALYSIS drops the flag.
             checked_ch.map { meta, f -> tuple(meta, f.go_annotations) },
             checked_ch.map { meta, f -> tuple(meta, f.species) }
         )

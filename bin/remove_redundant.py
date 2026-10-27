@@ -46,33 +46,42 @@ def filter_ppis(rows, keep):
     return [row for row in rows if row["protein1"] in keep and row["protein2"] in keep]
 
 
-def write_mqc(split_results, id_, n_ppis_discarded):
+def write_mqc(split_results, id_, n_ppis_discarded, ddi=False, n_no_instance=0):
     """The sole contributor to the per-dataset "split_bar_{id_}" PPI
     Partitioning bar chart for kahip/ilp datasets (sort_ppis.py/solve_ilp.py
     contribute nothing themselves -- see their modules): train/val/test show
     their final (post-CD-HIT) Kept size, and the single "discarded" bar is
     stacked by discard reason -- cross-partition (KaHIP/ILP, computed here
     from the original pre-split ppis.csv) vs CD-HIT-2D redundancy removal
-    (summed across val+test)."""
+    (summed across val+test).
+
+    `ddi` relabels for family pairs and adds a "Dropped (no instance)" reason."""
     total_cdhit_removed = sum(r["n_ppis_removed"] for r in split_results)
+    noun = "DDI" if ddi else "PPI"
 
     with open("remove_redundant_bar_mqc.tsv", "w") as fh:
         fh.write(
             f"# id: 'split_bar_{id_}'\n"
-            f"# section_name: 'PPI Partitioning: {id_}'\n"
-            "# description: 'PPI counts per split. The discarded bar is coloured by why "
-            "a PPI never made it into a split: cross-partition (KaHIP/ILP) or removed by "
-            "CD-HIT-2D redundancy filtering.'\n"
+            f"# section_name: '{noun} Partitioning: {id_}'\n"
+            f"# description: '{noun} counts per split. The discarded bar is coloured by why "
+            f"a {noun} never made it into a split: cross-partition (KaHIP/ILP) or removed by "
+            "CD-HIT-2D redundancy filtering"
+            + (", or dropped because a family has no domain instance" if ddi else "")
+            + ".'\n"
             "# plot_type: 'bargraph'\n"
             "# pconfig:\n"
             f"#     id: 'split_bar_plot_{id_}'\n"
-            f"#     title: 'PPI Partitioning: edges per split ({id_})'\n"
-            "#     ylab: '# PPIs'\n"
-            "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)\n"
+            f"#     title: '{noun} Partitioning: edges per split ({id_})'\n"
+            f"#     ylab: '# {noun}s'\n"
+            "Sample\tKept\tDiscarded (KaHIP/ILP)\tDiscarded (CD-HIT-2D)"
+            + ("\tDropped (no instance)" if ddi else "")
+            + "\n"
         )
+        extra = "\t0" if ddi else ""
         for r in split_results:
-            fh.write(f"{mqc_category(r['name'])}\t{r['n_ppis_nr']}\t0\t0\n")
-        fh.write(f"{mqc_category('discarded')}\t0\t{n_ppis_discarded}\t{total_cdhit_removed}\n")
+            fh.write(f"{mqc_category(r['name'])}\t{r['n_ppis_nr']}\t0\t0{extra}\n")
+        last = f"\t{n_no_instance}" if ddi else ""
+        fh.write(f"{mqc_category('discarded')}\t0\t{n_ppis_discarded}\t{total_cdhit_removed}{last}\n")
 
 
 def main():
@@ -98,9 +107,17 @@ def main():
     )
     args = ap.parse_args()
 
-    n_input = len(read_ppis(args.ppis))
     members = instances_by_family(read_instances(args.instances)) if args.instances else None
     node_label = "families" if members else "proteins"
+
+    input_ppis = read_ppis(args.ppis)
+    n_input = len(input_ppis)
+    # DDI mode: DDIs touching an instance-less family are gone before partitioning.
+    n_no_instance = (
+        sum(1 for row in input_ppis if not members.get(row["protein1"]) or not members.get(row["protein2"]))
+        if members
+        else 0
+    )
 
     train_seqs = read_fasta(args.train_fasta)
     val_seqs = read_fasta(args.val_fasta)
@@ -141,7 +158,7 @@ def main():
     # kahip/ilp assign every PPI to one split or discard it, so comparing input
     # total to the pre-CD-HIT split totals gives the discard count directly,
     # without threading it in from SORT_PPIS/SOLVE_ILP.
-    n_ppis_discarded = n_input - (len(train_ppis) + len(val_ppis) + len(test_ppis))
+    n_ppis_discarded = n_input - (len(train_ppis) + len(val_ppis) + len(test_ppis)) - n_no_instance
 
     write_mqc(
         [
@@ -163,6 +180,8 @@ def main():
         ],
         args.id,
         n_ppis_discarded,
+        ddi=bool(members),
+        n_no_instance=n_no_instance,
     )
 
 

@@ -14,6 +14,8 @@ process BIAS_ANALYSIS {
     tuple val(meta), val(negset), path("*_bias_mqc.tsv"), emit: mqc, optional: true
 
     script:
+    // go_annotations is [] under --bias_only --ddi_mode.
+    def go_arg = go_annotations ? "--go_annotations  ${go_annotations}" : ''
     """
     bias_analysis.py \\
         --attribute       ${attribute} \\
@@ -23,7 +25,7 @@ process BIAS_ANALYSIS {
         --test_realistic  ${test_realistic_csv} \\
         --blast           ${blast_tsv} \\
         --embeddings      ${embeddings} \\
-        --go_annotations  ${go_annotations} \\
+        ${go_arg} \\
         --species         ${species} \\
         --seed            ${params.seed}
     """
