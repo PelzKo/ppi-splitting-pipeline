@@ -2,7 +2,9 @@
 """Shared I/O utilities for PPI pipeline scripts."""
 
 import csv
+import heapq
 import sys
+from collections import defaultdict
 
 import numpy as np
 
@@ -91,6 +93,74 @@ def instances_by_family(rows):
 def instance_parent(instance_id):
     """Return the parent protein of an instance id ({family}_{protein}_{start}_{end})."""
     return instance_id.rsplit("_", 3)[1]
+
+
+EMPTY = frozenset()
+
+
+def pair_candidates(fam1, fam2, members, available):
+    """Return every instance pair of (fam1, fam2) within `available`; self-interactions include (i, i)."""
+    # A family can be missing from instances.tsv (e.g. a dead Pfam accession).
+    la = sorted(members.get(fam1, EMPTY) & available)
+    if fam1 == fam2:
+        return [(a, b) for i, a in enumerate(la) for b in la[i:]]
+    lb = sorted(members.get(fam2, EMPTY) & available)
+    return [(a, b) for a in la for b in lb]
+
+
+def diverse_pick(pairs, k, parent_of, rng):
+    """Pick up to k pairs, preferring pairs whose parent proteins are least used so far.
+
+    Each pick takes the lowest (used[parent_a] + used[parent_b], shuffled index), kept in a lazy heap.
+    """
+    order = sorted(pairs)
+    rng.shuffle(order)
+
+    touching = defaultdict(list)
+    for i, (a, b) in enumerate(order):
+        pa, pb = parent_of[a], parent_of[b]
+        touching[pa].append(i)
+        if pb != pa:
+            touching[pb].append(i)
+
+    score = [0] * len(order)
+    taken = [False] * len(order)
+    heap = [(0, i) for i in range(len(order))]  # already in heap order
+    used, chosen = defaultdict(int), []
+    while len(chosen) < k and heap:
+        s, i = heapq.heappop(heap)
+        if taken[i] or s != score[i]:
+            continue
+        taken[i] = True
+        a, b = order[i]
+        chosen.append(order[i])
+        # A pair whose instances share a parent uses that parent twice.
+        used[parent_of[a]] += 1
+        used[parent_of[b]] += 1
+        for p in {parent_of[a], parent_of[b]}:
+            for j in touching[p]:
+                if not taken[j]:
+                    score[j] = used[parent_of[order[j][0]]] + used[parent_of[order[j][1]]]
+                    heapq.heappush(heap, (score[j], j))
+    return chosen
+
+
+def expand_members(groups, members):
+    """Return the union of the members of `groups`; identity when `members` is falsy (PPI mode)."""
+    if not members:
+        return set(groups)
+    return {m for g in groups for m in members.get(g, ())}
+
+
+def strict_survivors(present, keep, members):
+    """Return the groups whose every member in `present` is also in `keep`.
+
+    Plain `present & keep` when `members` is falsy (PPI mode).
+    """
+    if not members:
+        return present & keep
+    lost = present - keep
+    return {g for g, ms in members.items() if (ms & present) and not (ms & lost)}
 
 
 # ---------------------------------------------------------------------------

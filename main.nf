@@ -35,6 +35,12 @@ params {
     ddi_mode: Boolean
     ddi_examples_target: Integer
     ddi_examples_pool_factor: Integer
+    ddi_select_max_sec: Integer
+    ddi_max_ilp_candidates: Integer
+    ddi_lambda_diversity: Float
+    ddi_shortlist_factor: Integer
+    ddi_select_verbose: Boolean
+    ddi_candidate_factor: Integer
 }
 
 include { samplesheetToList } from 'plugin/nf-schema'
@@ -199,7 +205,9 @@ def buildDatasetsChannel() {
             neg_ilp_lambda_degree    : isGiven(row.neg_ilp_lambda_degree)     ? row.neg_ilp_lambda_degree     : params.neg_ilp_lambda_degree,
             neg_ilp_lambda_taxon_pair: isGiven(row.neg_ilp_lambda_taxon_pair) ? row.neg_ilp_lambda_taxon_pair : params.neg_ilp_lambda_taxon_pair,
             neg_ilp_lambda_self_loop : isGiven(row.neg_ilp_lambda_self_loop)  ? row.neg_ilp_lambda_self_loop  : params.neg_ilp_lambda_self_loop,
-            neg_ilp_lambda_jaccard   : isGiven(row.neg_ilp_lambda_jaccard)    ? row.neg_ilp_lambda_jaccard    : params.neg_ilp_lambda_jaccard,
+            // DDI mode has no GO annotations; 0 makes the ILP skip the Jaccard term
+            // instead of reporting an all-zero one as perfectly matched.
+            neg_ilp_lambda_jaccard   : params.ddi_mode ? 0 : (isGiven(row.neg_ilp_lambda_jaccard) ? row.neg_ilp_lambda_jaccard : params.neg_ilp_lambda_jaccard),
         ]
         // An absent optional file is [], never null: a `path` input accepts [] but not null.
         def files = [
@@ -267,7 +275,8 @@ workflow PPI_SPLITTING {
 
     ppis_ch = checked_ch.map { meta, f -> tuple(meta, f.ppis) }
 
-    // Gate the candidate network on ilp_candidates once, here.
+    // Gate the candidate network on ilp_candidates once, here, so SELECT_EXAMPLES and
+    // SAMPLE_NEGATIVES_ILP cannot disagree about whether it is in play.
     prepared_ch = checked_ch.map { meta, f ->
         def negsets = parseNegsets(meta, f.candidate_network)
         if (params.bias_only && negsets.size() != 1) {
@@ -327,13 +336,14 @@ workflow PPI_SPLITTING {
         } else {
             clustered = CLUSTERING(
                 data.sequences, data.lengths,
-                checked_ch.map { meta, f -> tuple(meta, f.blast_results) }
+                checked_ch.map { meta, f -> tuple(meta, f.blast_results) },
+                data.instances
             )
             partition_ch    = clustered.partition
             node_mapping_ch = clustered.node_mapping
         }
 
-        split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch)
+        split = SPLIT_POSITIVES(ppis_ch, data.sequences, partition_ch, node_mapping_ch, data.instances, candidate_network_ch)
 
         neg = SAMPLE_NEGATIVES(
             split.train_ppis, split.val_ppis, split.test_ppis,

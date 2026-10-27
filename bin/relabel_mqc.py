@@ -34,6 +34,9 @@ KIND_ORDER = [
     "neg_generalstats",
     "pos_neg_bar",
     "classifier_metrics",
+    "ddi_examples_bar",
+    "ddi_examples_stats",
+    "ddi_examples_ilp",
     "neg_ilp_diagnostics",
     "neg_ilp_residuals",
     # per-dataset, one section each
