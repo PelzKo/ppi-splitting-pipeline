@@ -1,15 +1,17 @@
+// One task per (dataset, attribute, negative set).
 process BIAS_ANALYSIS {
-    publishDir(path: { "${params.outdir}/${meta.id}/multiqc" }, mode: 'copy')
-    tag "${meta.id}_${attribute}"
+    // Per negative set: the filename carries no set name.
+    publishDir(path: { "${params.outdir}/${meta.id}/bias/${negset}" }, mode: 'copy')
+    tag "${meta.id}_${negset}_${attribute}"
     label 'error_retry'
 
     input:
-    tuple val(meta), val(attribute),
+    tuple val(meta), val(attribute), val(negset),
           path(train_csv), path(val_csv), path(test_balanced_csv), path(test_realistic_csv),
           path(blast_tsv), path(embeddings), path(go_annotations), path(species)
 
     output:
-    tuple val(meta), path("*_bias_mqc.tsv"), emit: mqc, optional: true
+    tuple val(meta), val(negset), path("*_bias_mqc.tsv"), emit: mqc, optional: true
 
     script:
     """

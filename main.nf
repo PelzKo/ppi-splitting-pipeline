@@ -54,6 +54,27 @@ def checkSplitFractions(meta) {
     }
 }
 
+// Parse and validate one row's comma-separated negative-set list. Called from PPI_SPLITTING
+// so embedding pipelines get the same cross-column checks.
+def parseNegsets(meta, candidate_network) {
+    def known = ["default", "ilp", "ilp_candidates", "uniform"]
+    def names = meta.negative_sampling_method.toString().tokenize(',')*.trim().findAll { n -> n }
+    if (!names) {
+        error("Dataset '${meta.id}': negative_sampling_method is empty -- name at least one of ${known.join(', ')}.")
+    }
+    def unknown = names.findAll { n -> !(n in known) }
+    if (unknown) {
+        error("Dataset '${meta.id}': unknown negative_sampling_method ${unknown.join(', ')} (known: ${known.join(', ')}).")
+    }
+    if (names.size() != new HashSet(names).size()) {
+        error("Dataset '${meta.id}': negative_sampling_method '${meta.negative_sampling_method}' names a method more than once.")
+    }
+    if ("ilp_candidates" in names && !candidate_network) {
+        error("Dataset '${meta.id}': negative_sampling_method lists 'ilp_candidates' but the row supplies no candidate_network.")
+    }
+    return names
+}
+
 // One row per PPI dataset. Anything left blank in the samplesheet falls back to the corresponding default in
 // conf/params.config, so a single run can process several datasets in parallel, each with its own overrides.
 def buildDatasetsChannel() {
@@ -120,7 +141,10 @@ def buildDatasetsChannel() {
             test_split               : isGiven(row.test_split)               ? row.test_split               : params.test_split,
             ilp_epsilon              : isGiven(row.ilp_epsilon)              ? row.ilp_epsilon              : params.ilp_epsilon,
             ilp_max_sec              : isGiven(row.ilp_max_sec)              ? row.ilp_max_sec              : params.ilp_max_sec,
-            negative_sampling_method : params.split_only ? "ilp" : (isGiven(row.negative_sampling_method) ? row.negative_sampling_method : params.negative_sampling_method),
+            // --split_only keeps ilp/ilp_candidates and forces anything else to ilp.
+            negative_sampling_method : params.split_only
+                ? ((isGiven(row.negative_sampling_method) && row.negative_sampling_method.toString().tokenize(',')*.trim().every { n -> n in ["ilp", "ilp_candidates"] }) ? row.negative_sampling_method : "ilp")
+                : (isGiven(row.negative_sampling_method) ? row.negative_sampling_method : params.negative_sampling_method),
             neg_ilp_time_limit       : isGiven(row.neg_ilp_time_limit)       ? row.neg_ilp_time_limit       : params.neg_ilp_time_limit,
             neg_ilp_lambda_degree    : isGiven(row.neg_ilp_lambda_degree)     ? row.neg_ilp_lambda_degree     : params.neg_ilp_lambda_degree,
             neg_ilp_lambda_taxon_pair: isGiven(row.neg_ilp_lambda_taxon_pair) ? row.neg_ilp_lambda_taxon_pair : params.neg_ilp_lambda_taxon_pair,
@@ -179,8 +203,9 @@ workflow PPI_SPLITTING {
             if (missing) {
                 error("--split_only requires every dataset to supply ${required.join(', ')} (dataset '${meta.id}' is missing ${missing.join(', ')}).")
             }
-            if (meta.split_method != "ilp" || meta.negative_sampling_method.toString() != "ilp") {
-                error("--split_only runs the ILP path only, but dataset '${meta.id}' asks for split_method='${meta.split_method}', negative_sampling_method='${meta.negative_sampling_method}' (allowed: ilp).")
+            def neg_names = meta.negative_sampling_method.toString().tokenize(',')*.trim().findAll { n -> n }
+            if (meta.split_method != "ilp" || !neg_names || !neg_names.every { n -> n in ["ilp", "ilp_candidates"] }) {
+                error("--split_only runs the ILP path only, but dataset '${meta.id}' asks for split_method='${meta.split_method}', negative_sampling_method='${meta.negative_sampling_method}' (allowed: ilp, ilp_candidates or both).")
             }
         }
         tuple(meta, f)
@@ -188,13 +213,30 @@ workflow PPI_SPLITTING {
 
     ppis_ch = checked_ch.map { meta, f -> tuple(meta, f.ppis) }
 
+    // Gate the candidate network on ilp_candidates once, here.
+    prepared_ch = checked_ch.map { meta, f ->
+        def negsets = parseNegsets(meta, f.candidate_network)
+        if (params.bias_only && negsets.size() != 1) {
+            error("Dataset '${meta.id}': --bias_only takes one negative set per row, but negative_sampling_method names ${negsets.size()} (${negsets.join(', ')}).")
+        }
+        if (f.candidate_network && !("ilp_candidates" in negsets)) {
+            log.warn "${meta.id}: candidate_network supplied but negative_sampling_method does not list 'ilp_candidates' -- ignoring the network"
+        }
+        tuple(meta, negsets, ("ilp_candidates" in negsets) ? f.candidate_network : [])
+    }
+    // tuple(meta, [negset, ...]) -- the negative sets this row wants, in list order.
+    negsets_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, negsets) }
+    // tuple(meta, candidate_network or [])
+    candidate_network_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, cand) }
+
     if (params.bias_only) {
-        // --bias_only: the four labelled splits come straight from the files map.
+        // --bias_only: the four labelled splits come straight from the files map, one negative set per row.
+        bias_in = checked_ch.join(negsets_ch).map { meta, f, negsets -> tuple(meta, negsets[0], f) }
         bias = BIAS_DIAGNOSTICS(
-            checked_ch.map { meta, f -> tuple(meta, f.train_ppis) },
-            checked_ch.map { meta, f -> tuple(meta, f.val_ppis) },
-            checked_ch.map { meta, f -> tuple(meta, f.test_balanced_ppis) },
-            checked_ch.map { meta, f -> tuple(meta, f.test_realistic_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.train_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.val_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.test_balanced_ppis) },
+            bias_in.map { meta, ns, f -> tuple(meta, ns, f.test_realistic_ppis) },
             checked_ch.map { meta, f -> tuple(meta, f.blast_results) },
             checked_ch.map { meta, f -> tuple(meta, file(meta.embedding_model, checkIfExists: true)) },
             checked_ch.map { meta, f -> tuple(meta, f.go_annotations) },
@@ -228,7 +270,8 @@ workflow PPI_SPLITTING {
         neg = SAMPLE_NEGATIVES(
             split.train_ppis, split.val_ppis, split.test_ppis,
             data.species, data.go_annotations,
-            checked_ch.map { meta, f -> tuple(meta, f.candidate_network) }
+            candidate_network_ch,
+            negsets_ch
         )
 
         // --split_only stops here: SOLVE_ILP (via SPLIT_POSITIVES) + CDHIT2D +
@@ -248,7 +291,7 @@ workflow PPI_SPLITTING {
             )
 
             qc = QC(
-                bias.mqc, clustered.blast_out,
+                bias.scatter, clustered.blast_out,
                 split.train_fasta, split.val_fasta, split.test_fasta,
                 split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc
             )
@@ -259,9 +302,10 @@ workflow PPI_SPLITTING {
     }
 
     emit:
+    // negset is a tuple field, not a meta key: join these on `by: [0, 1]`.
     // Under --bias_only every channel is empty.
     sequences        = sequences_ch       // tuple(meta, sequences.fasta)
-    labelled         = labelled_ch        // tuple(meta, label, csv)
+    labelled         = labelled_ch        // tuple(meta, negset, label, csv)
     multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only and --bias_only
 }
 

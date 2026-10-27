@@ -154,7 +154,8 @@
       },
       "negative_sampling_method": {
         "type": "string",
-        "enum": ["default", "ilp", "uniform"]
+        "pattern": "^(default|ilp|ilp_candidates|uniform)(,(default|ilp|ilp_candidates|uniform))*$",
+        "errorMessage": "negative_sampling_method must be a comma-separated list, no spaces, of default | ilp | ilp_candidates | uniform (e.g. 'ilp,ilp_candidates')."
       },
       "neg_ilp_time_limit": {
         "type": "number",
