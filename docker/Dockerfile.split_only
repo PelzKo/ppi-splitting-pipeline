@@ -1,0 +1,42 @@
+# Minimal image for `--split_only` runs: the ILP splitting core only.
+#   docker build -f docker/Dockerfile.split_only -t docker.io/konstantinpelz/ppi-splitting-split-only:<tag> .
+#   nextflow run main.nf --samplesheet s.csv --split_only \
+#       -with-docker docker.io/konstantinpelz/ppi-splitting-split-only:<tag>
+#
+# Does not carry bin/ (standalone runs only) and does not read environment.yml.
+# Covers GET_LENGTHS, SORT_PPIS, SOLVE_ILP, CDHIT2D, REMOVE_REDUNDANT,
+# SAMPLE_NEGATIVES_ILP and SAMPLE_NEGATIVES_DEGREE.
+FROM mambaorg/micromamba:2.0.5
+
+USER root
+
+# procps: Nextflow's trace polling. ca-certificates: Gurobi WLS license check-out.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Exact pins: two builds must not resolve different solver versions (ILP results).
+# pyscipopt is the SCIP fallback when Gurobi is unavailable.
+RUN micromamba install -y -n base -c conda-forge -c bioconda \
+      python=3.14.7 \
+      numpy=2.5.2 \
+      scipy=1.18.0 \
+      pyscipopt=6.2.1 \
+      cd-hit=4.8.1 \
+ && micromamba clean --all --yes
+ENV PATH=/opt/conda/bin:$PATH
+
+# cvxpy and every transitive dependency pinned, so pip resolves nothing at build time.
+# numpy and scipy come from the conda layer above.
+ENV PIP_NO_CACHE_DIR=1
+RUN pip install --no-cache-dir \
+      cvxpy==1.9.2 \
+      osqp==1.1.3 \
+      clarabel==0.11.1 \
+      scs==3.2.11 \
+      qdldl==0.1.9.post1 \
+      sparsediffpy==0.3.0 \
+      highspy==1.15.1 \
+      gurobipy==13.0.3
+
+USER $MAMBA_USER
