@@ -9,7 +9,18 @@ workflow DATA_PREP_DDI {
     datasets_ch  // tuple(meta, files): ppis, sequences, species, domain_instances
 
     main:
-    branched = datasets_ch.branch { meta, f ->
+    // The precomputed hatch is all-or-nothing; a partial supply would otherwise
+    // be ignored silently and fetched from Pfam.
+    checked_ch = datasets_ch.map { meta, f ->
+        def supplied = [sequences: f.sequences, species: f.species, domain_instances: f.domain_instances]
+        def missing  = supplied.findAll { k, v -> !v }.keySet()
+        if (missing && missing.size() < supplied.size()) {
+            error("Row '${meta.id}' supplies ${(supplied.keySet() - missing).join(', ')} but not ${missing.join(', ')}: give all three or none (none fetches them from Pfam).")
+        }
+        tuple(meta, f)
+    }
+
+    branched = checked_ch.branch { meta, f ->
         precomputed: f.sequences && f.species && f.domain_instances
             return tuple(meta, f.sequences, f.species, f.domain_instances)
         needs_fetch: true

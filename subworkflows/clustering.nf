@@ -36,8 +36,15 @@ workflow CLUSTERING {
 
     // The ILP splitter clusters proteins into many small KaHIP partitions
     // first, whereas the default splitter partitions straight into train/val/test.
+    // k is clamped to the node count: a larger k leaves empty KaHIP blocks and
+    // makes the ILP infeasible. The clan graph in DDI mode is often that small.
     kahip_inputs = metis_out.graph.map { meta, graph ->
-        def k = (meta.split_method == "ilp") ? meta.ilp_kahip_k : meta.kahip_k
+        def k      = (meta.split_method == "ilp") ? meta.ilp_kahip_k : meta.kahip_k
+        def nodes  = graph.withReader { reader -> reader.readLine() }.trim().split(/\s+/)[0] as int
+        if (k > nodes) {
+            log.warn "${meta.id}: similarity.graph has only ${nodes} nodes -- clamping k from ${k} to ${nodes}"
+            k = nodes
+        }
         tuple(meta, graph, k)
     }
     kahip_out = RUN_KAHIP(kahip_inputs)

@@ -11,7 +11,18 @@ workflow DATA_PREP {
     datasets_ch  // tuple(meta, files): ppis, sequences, go_annotations, species
 
     main:
-    branched = datasets_ch.branch { meta, f ->
+    // The precomputed hatch is all-or-nothing; a partial supply would otherwise
+    // be ignored silently and fetched from UniProt.
+    checked_ch = datasets_ch.map { meta, f ->
+        def supplied = [sequences: f.sequences, go_annotations: f.go_annotations, species: f.species]
+        def missing  = supplied.findAll { k, v -> !v }.keySet()
+        if (missing && missing.size() < supplied.size()) {
+            error("Row '${meta.id}' supplies ${(supplied.keySet() - missing).join(', ')} but not ${missing.join(', ')}: give all three or none (none fetches them from UniProt).")
+        }
+        tuple(meta, f)
+    }
+
+    branched = checked_ch.branch { meta, f ->
         precomputed: f.sequences && f.go_annotations && f.species
             return tuple(meta, f.sequences, f.go_annotations, f.species)
         needs_fetch: true

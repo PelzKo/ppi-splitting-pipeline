@@ -1,4 +1,5 @@
 include { SAMPLE_NEGATIVES_DEGREE; SAMPLE_NEGATIVES_ILP; EXPAND_NEGATIVES } from '../processes/negative_sampling'
+include { gurobiLicenseFile } from '../helpers/gurobi_license'
 
 // Output filename suffix: "" for a single negative set, "_<negset>" for several.
 def negsuffix(negsets, negset) {
@@ -71,9 +72,7 @@ workflow SAMPLE_NEGATIVES {
         default: true
     }
 
-    neg_gurobi_license_ch = params.gurobi_license
-        ? channel.value(file(params.gurobi_license, checkIfExists: true))
-        : channel.value([])
+    neg_gurobi_license_ch = channel.value(gurobiLicenseFile(params.gurobi_license))
 
     // species/go_annotations/candidate_network are one-per-dataset;
     // combine(by: 0) broadcasts each dataset's single file to every one

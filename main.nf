@@ -53,9 +53,12 @@ include { SAMPLE_NEGATIVES } from './subworkflows/sample_negatives'
 include { TRAIN_BASELINE }   from './subworkflows/train_baseline'
 include { QC }               from './subworkflows/qc'
 include { BIAS_DIAGNOSTICS } from './subworkflows/bias_diagnostics'
+include { MULTIQC }          from './processes/qc'
 
 include { mqcLabel }        from './helpers/mqc_labels'
 
+// samplesheetToList() represents a blank cell as [] (not null), even for
+// numeric fields where 0 is a legitimate override -- so check both.
 def isGiven(v) {
     !(v == null || v == [])
 }
@@ -240,6 +243,10 @@ workflow PPI_SPLITTING {
                   // meta may carry an optional mqc_labels map (negset -> MultiQC label).
 
     main:
+    if (params.split_only && params.bias_only) {
+        error("--split_only and --bias_only are mutually exclusive.")
+    }
+
     // Validate every caller's datasets here (embedding pipelines skip buildDatasetsChannel()).
     // Validate only, never rewrite meta: it is the join key.
     checked_ch = datasets_ch.map { meta, f ->
@@ -319,12 +326,12 @@ workflow PPI_SPLITTING {
             checked_ch.map { meta, f -> tuple(meta, f.go_annotations) },
             checked_ch.map { meta, f -> tuple(meta, f.species) }
         )
+        multiqc_report_ch = MULTIQC(bias.scatter.map { id, f -> f }.collect(), mqc_order_ch).report
 
         // Every emit is defined in both branches so its shape does not depend on the mode.
         instances_ch        = channel.empty()
         sequences_ch        = channel.empty()
         labelled_ch         = channel.empty()
-        multiqc_report_ch   = channel.empty()
         labelled_inst_ch    = channel.empty()
         dropped_families_ch = channel.empty()
     } else {
@@ -395,12 +402,12 @@ workflow PPI_SPLITTING {
 
     emit:
     // negset is a tuple field, not a meta key: join these on `by: [0, 1]`.
-    // Under --bias_only every channel is empty.
+    // Under --bias_only every channel but multiqc_report is empty.
     instances        = instances_ch       // tuple(meta, instances.tsv); (meta, []) in PPI mode
     sequences        = sequences_ch       // tuple(meta, sequences.fasta)
     labelled         = labelled_ch        // tuple(meta, negset, label, csv) at family level
     labelled_inst    = labelled_inst_ch   // same, at domain-instance level; empty in PPI mode
-    multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only and --bias_only
+    multiqc_report   = multiqc_report_ch  // path multiqc_report.html; empty under --split_only
     dropped_families = dropped_families_ch  // tuple([id: "_shared"], tsv); at most one item, never join() it
 }
 

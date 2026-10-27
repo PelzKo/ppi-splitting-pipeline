@@ -186,5 +186,6 @@
       }
     },
     "required": ["id"]
-  }
+  },
+  "uniqueEntries": ["id"]
 }
