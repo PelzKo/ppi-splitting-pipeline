@@ -1,4 +1,5 @@
 include { SIMILARITY_HEATMAP; MULTIQC } from '../processes/qc'
+include { mqcRowLabel } from '../helpers/mqc_labels'
 
 // Some mqc-emitting processes glob-match more than one file per task, which
 // Nextflow packs into a List. Flatten to one (id, file) pair per file.
@@ -22,10 +23,12 @@ workflow QC {
     nr_mqc
     neg_mqc
     clf_mqc
+    mqc_order             // comma-joined display labels, in report order
 
     main:
+    // meta.id is the publishDir component, the label only names the report section.
     heatmap_inputs = train_fasta.join(val_fasta).join(test_fasta).join(blast_out)
-        .map { meta, t, v, te, b -> tuple(meta.id, t, v, te, b) }
+        .map { meta, t, v, te, b -> tuple(meta.id, mqcRowLabel(meta), t, v, te, b) }
     heatmap = SIMILARITY_HEATMAP(heatmap_inputs)
 
     // Bias tables are published by BIAS_ANALYSIS; only the scatter goes into the report.
@@ -38,7 +41,7 @@ workflow QC {
         .map { id, f -> f }
         .collect()
 
-    multiqc = MULTIQC(mqc_files)
+    multiqc = MULTIQC(mqc_files, mqc_order)
 
     emit:
     multiqc_report = multiqc.report

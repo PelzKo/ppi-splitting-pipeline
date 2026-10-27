@@ -29,6 +29,7 @@ process BIAS_ANALYSIS {
     """
 }
 
+// id is the MultiQC display label for one (dataset, negative set), not meta.id.
 process COLLECT_BIAS {
     tag "${id}_bias_scatter"
 
@@ -44,12 +45,14 @@ process COLLECT_BIAS {
     """
 }
 
+// `id` (meta.id) is the publishDir component, `label` the MultiQC display label;
+// they differ for a row with several negative sets.
 process SIMILARITY_HEATMAP {
     publishDir(path: { "${params.outdir}/${id}/multiqc" }, mode: 'copy')
-    tag "${id}_heatmap"
+    tag "${label}_heatmap"
 
     input:
-    tuple val(id), path(train_fasta), path(val_fasta), path(test_fasta), path(blast_tsv)
+    tuple val(id), val(label), path(train_fasta), path(val_fasta), path(test_fasta), path(blast_tsv)
 
     output:
     tuple val(id), path("similarity_heatmap_mqc.html")
@@ -63,7 +66,7 @@ process SIMILARITY_HEATMAP {
         --blast       ${blast_tsv} \\
         --max_per_split ${params.heatmap_max_per_split} \\
         --seed        ${params.seed} \\
-        --id          ${id}
+        --id          ${label}
     """
 }
 
@@ -71,12 +74,16 @@ process SIMILARITY_HEATMAP {
 // dataset's contributions into its own numbered subdirectory, since
 // same-named files (e.g. classifier_metrics_mqc.tsv) would otherwise
 // collide -- MultiQC scans subdirectories recursively, so this is transparent.
+// relabel_mqc.py applies the run-wide dataset order here, so it stays out of the
+// emitting tasks' hashes, and pins the section order MultiQC would otherwise take
+// from channel arrival.
 process MULTIQC {
     publishDir(path: { "${params.outdir}/multiqc" }, mode: 'copy')
     tag "multiqc"
 
     input:
     path multiqc_files, stageAs: "?/*"
+    val  mqc_order  // comma-joined display labels, in report order
 
     output:
     path "multiqc_report.html", emit: report
@@ -84,6 +91,14 @@ process MULTIQC {
 
     script:
     """
-    multiqc . --title "PPI Splitting Pipeline" --filename multiqc_report.html
+    relabel_mqc.py . \\
+        --out       relabelled \\
+        --mqc-order '${mqc_order}' \\
+        --config    multiqc_config.yml
+
+    multiqc relabelled \\
+        -c multiqc_config.yml \\
+        --title "PPI Splitting Pipeline" \\
+        --filename multiqc_report.html
     """
 }

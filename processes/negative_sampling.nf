@@ -1,3 +1,5 @@
+include { mqcLabel } from '../helpers/mqc_labels'
+
 // nsuffix goes on the output filename, never on --split-name: that is looked up
 // in utils.SPLIT_ORDER, and an unknown key would misorder the report.
 process SAMPLE_NEGATIVES_DEGREE {
@@ -25,7 +27,7 @@ process SAMPLE_NEGATIVES_DEGREE {
         --ratio      ${ratio} \\
         ${uniform_flag} \\
         --seed       ${params.seed} \\
-        --id         ${meta.id}
+        --id         ${mqcLabel(meta, negset)}
     """
 }
 
@@ -74,6 +76,6 @@ process SAMPLE_NEGATIVES_ILP {
         --residuals-out      ${label}_residuals_mqc.tsv \\
         --max-candidates     \$max_candidates \\
         --verbose \\
-        --id                 ${meta.id}
+        --id                 ${mqcLabel(meta, negset)}
     """
 }

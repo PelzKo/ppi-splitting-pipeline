@@ -42,6 +42,8 @@ include { TRAIN_BASELINE }   from './subworkflows/train_baseline'
 include { QC }               from './subworkflows/qc'
 include { BIAS_DIAGNOSTICS } from './subworkflows/bias_diagnostics'
 
+include { mqcLabel }        from './helpers/mqc_labels'
+
 def isGiven(v) {
     !(v == null || v == [])
 }
@@ -73,6 +75,46 @@ def parseNegsets(meta, candidate_network) {
         error("Dataset '${meta.id}': negative_sampling_method lists 'ilp_candidates' but the row supplies no candidate_network.")
     }
     return names
+}
+
+// Warn when meta.mqc_labels does not cover exactly the row's negative sets.
+def checkMqcLabels(meta, negsets) {
+    if (!(meta.mqc_labels instanceof Map)) {
+        return
+    }
+    def given    = meta.mqc_labels.keySet().collect { k -> k.toString() }
+    def expected = negsets.collect { n -> n.toString() }
+    if (given.toSorted() != expected.toSorted()) {
+        log.warn "Dataset '${meta.id}': mqc_labels covers ${given.toSorted().join(', ')} but the row asks for negative sets ${expected.toSorted().join(', ')} -- missing sets fall back to '<id>_<negset>'."
+    }
+}
+
+// Resolve the run's report order from every display label it will produce.
+// params.mqc_order may be a list (config) or a comma-separated string (CLI).
+def resolveMqcOrder(labels) {
+    def present   = labels.collect { l -> l.toString() }.unique()
+    def requested = (params.mqc_order instanceof CharSequence)
+        ? params.mqc_order.toString().tokenize(',')*.trim().findAll { r -> r }
+        : (params.mqc_order ?: []).collect { r -> r.toString().trim() }.findAll { r -> r }
+
+    def ordered = []
+    requested.each { r ->
+        if (!(r in present)) {
+            log.warn "mqc_order names '${r}', which is not a display label of this run -- ignoring it. Labels present: ${present.toSorted().join(', ')}"
+        }
+        else if (r in ordered) {
+            log.warn "mqc_order names '${r}' more than once -- keeping the first occurrence."
+        }
+        else {
+            ordered << r
+        }
+    }
+    // Labels the list did not mention, appended alphabetically.
+    def leftover = (present - ordered).toSorted()
+    if (requested && !ordered) {
+        log.warn "mqc_order was given but matched none of this run's display labels, so the report order is alphabetical. Labels present: ${present.toSorted().join(', ')}"
+    }
+    return (ordered + leftover).join(',')
 }
 
 // One row per PPI dataset. Anything left blank in the samplesheet falls back to the corresponding default in
@@ -175,6 +217,7 @@ def buildDatasetsChannel() {
 workflow PPI_SPLITTING {
     take:
     datasets_ch   // tuple(meta, filesMap); filesMap keys as in buildDatasetsChannel(), absent = [].
+                  // meta may carry an optional mqc_labels map (negset -> MultiQC label).
 
     main:
     // Validate every caller's datasets here (embedding pipelines skip buildDatasetsChannel()).
@@ -219,6 +262,7 @@ workflow PPI_SPLITTING {
         if (params.bias_only && negsets.size() != 1) {
             error("Dataset '${meta.id}': --bias_only takes one negative set per row, but negative_sampling_method names ${negsets.size()} (${negsets.join(', ')}).")
         }
+        checkMqcLabels(meta, negsets)
         if (f.candidate_network && !("ilp_candidates" in negsets)) {
             log.warn "${meta.id}: candidate_network supplied but negative_sampling_method does not list 'ilp_candidates' -- ignoring the network"
         }
@@ -228,6 +272,12 @@ workflow PPI_SPLITTING {
     negsets_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, negsets) }
     // tuple(meta, candidate_network or [])
     candidate_network_ch = prepared_ch.map { meta, negsets, cand -> tuple(meta, cand) }
+
+    // One comma-joined report order string; only MULTIQC takes it, so it stays out of other task hashes.
+    mqc_order_ch = prepared_ch
+        .flatMap { meta, negsets, cand -> negsets.collect { ns -> mqcLabel(meta, ns) } }
+        .collect()
+        .map { labels -> resolveMqcOrder(labels) }
 
     if (params.bias_only) {
         // --bias_only: the four labelled splits come straight from the files map, one negative set per row.
@@ -293,7 +343,8 @@ workflow PPI_SPLITTING {
             qc = QC(
                 bias.scatter, clustered.blast_out,
                 split.train_fasta, split.val_fasta, split.test_fasta,
-                split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc
+                split.sorted_mqc, split.nr_mqc, neg.mqc, baseline.mqc,
+                mqc_order_ch
             )
             multiqc_report_ch = qc.multiqc_report
         }

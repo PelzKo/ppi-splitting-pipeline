@@ -1,4 +1,5 @@
 include { BIAS_ANALYSIS; COLLECT_BIAS } from '../processes/qc'
+include { mqcLabel } from '../helpers/mqc_labels'
 
 // Runs BIAS_ANALYSIS for every attribute applicable to each dataset and
 // negative set, and collects the results into one scatter per pair. Shared by
@@ -51,11 +52,10 @@ workflow BIAS_DIAGNOSTICS {
     // Group by the negset-qualified label so a row's sets get separate scatters.
     bias_by_negset = bias.mqc.flatMap { meta, negset, f ->
         def files = (f instanceof List) ? f : [f]
-        def multi = meta.negative_sampling_method.toString().tokenize(',').size() > 1
-        files.collect { ff -> tuple((multi ? "${meta.id}_${negset}" : "${meta.id}").toString(), ff) }
+        files.collect { ff -> tuple(mqcLabel(meta, negset), ff) }
     }
     scatter = COLLECT_BIAS(bias_by_negset.groupTuple())
 
     emit:
-    scatter = scatter.mqc   // tuple(label, bias_scatter_mqc.html)
+    scatter = scatter.mqc   // tuple(display label, bias_scatter_mqc.html)
 }
