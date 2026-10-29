@@ -1,8 +1,5 @@
-# One image for every process in the pipeline. .github/workflows/publish-docker.yml
-# builds it on every GitHub release and pushes ghcr.io/bionetslab/ppi-splitting-pipeline
-# as <release tag> and latest; the docker/singularity/apptainer profiles use latest.
-# Local build from the repository root:
-#   docker build -f docker/Dockerfile -t ppi-splitting-pipeline .
+# Image for every pipeline process. .github/workflows/publish-docker.yml builds and pushes it
+# to ghcr on each GitHub release; the container profiles in nextflow.config use its latest tag.
 FROM mambaorg/micromamba:2.0.5
 
 USER root

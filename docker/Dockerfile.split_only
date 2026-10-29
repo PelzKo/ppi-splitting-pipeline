@@ -1,10 +1,6 @@
-# Minimal image for `--split_only` runs: the ILP splitting core only.
-# Published with the main image on every GitHub release as
-# ghcr.io/bionetslab/ppi-splitting-pipeline-split-only (<release tag> and latest):
+# Smaller image for `--split_only` runs. It has no bin/, so it only works standalone:
 #   nextflow run main.nf --samplesheet s.csv --split_only \
 #       -with-docker ghcr.io/bionetslab/ppi-splitting-pipeline-split-only:latest
-#
-# Does not carry bin/ (standalone runs only) and does not read environment.yml.
 # Covers GET_LENGTHS, SORT_PPIS, SOLVE_ILP, CDHIT2D, REMOVE_REDUNDANT,
 # SAMPLE_NEGATIVES_ILP and SAMPLE_NEGATIVES_DEGREE.
 FROM mambaorg/micromamba:2.0.5
