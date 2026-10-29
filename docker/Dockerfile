@@ -1,8 +1,8 @@
-# One image for every process in the pipeline. Build from the repository root:
-#   docker build -f docker/Dockerfile -t docker.io/konstantinpelz/ppi-splitting:<tag> .
-#   docker push  docker.io/konstantinpelz/ppi-splitting:<tag>
-# <tag> must equal the git tag it is built from (the image carries bin/) and the
-# `docker` profile in nextflow.config.
+# One image for every process in the pipeline. .github/workflows/publish-docker.yml
+# builds it on every GitHub release and pushes ghcr.io/bionetslab/ppi-splitting-pipeline
+# as <release tag> and latest; the docker/singularity/apptainer profiles use latest.
+# Local build from the repository root:
+#   docker build -f docker/Dockerfile -t ppi-splitting-pipeline .
 FROM mambaorg/micromamba:2.0.5
 
 USER root
